@@ -1,2 +1,2 @@
 # gpubench
-GPU &amp; System Benchmarking &amp; Scoring
+GPU &amp; System Benchmarking with comparative scoring
