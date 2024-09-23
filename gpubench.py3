@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import time
-import json
 import os
 import sys
+import time
+import json
+import torch
 import argparse
 import platform
+import subprocess
+import torch.nn as nn
+import torch.optim as optim
 import psutil
 import GPUtil
-import subprocess
 import textwrap
 from tabulate import tabulate
 
@@ -58,25 +58,35 @@ def get_system_info():
 
 def benchmark_gpu_data_generation(data_size_gb, reference_metrics):
     """
-    Generates a large tensor of random numbers directly on the GPU to benchmark GPU memory bandwidth.
-    - Allocates a tensor of size `data_size_gb` GB on the GPU.
+    Generates large tensors of random numbers directly on the GPUs to benchmark GPU memory bandwidth.
+    - Allocates tensors of size `data_size_gb` GB divided equally across available GPUs.
     - Measures the time taken to generate the data.
     """
     try:
-        # Calculate total number of elements needed for the given data size
-        # Assuming float32 (4 bytes per element)
-        num_elements = int((data_size_gb * 1e9) / 4)
+        num_gpus = torch.cuda.device_count()
+        if num_gpus > 1:
+            print(f"Using {num_gpus} GPUs for GPU Data Generation")
+        else:
+            print("Using 1 GPU for GPU Data Generation")
 
-        # Generate data on GPU
+        # Calculate total number of elements per GPU
+        num_elements_per_gpu = int(((data_size_gb * 1e9) / 4) / num_gpus)
+
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
         start = time.time()
-        gpu_data = torch.randn(num_elements, device='cuda', dtype=torch.float32)
+
+        tensors = []
+        for i in range(num_gpus):
+            with torch.cuda.device(i):
+                tensor = torch.randn(num_elements_per_gpu, device=f'cuda:{i}', dtype=torch.float32)
+                tensors.append(tensor)
+
         torch.cuda.synchronize()
         end = time.time()
 
         gen_time = end - start
-        data_size_bytes = num_elements * 4  # float32
+        data_size_bytes = num_elements_per_gpu * 4 * num_gpus  # float32
         data_size_gb_actual = data_size_bytes / 1e9
         gen_bandwidth = data_size_gb_actual / gen_time if gen_time > 0 else float('inf')
 
@@ -91,7 +101,7 @@ def benchmark_gpu_data_generation(data_size_gb, reference_metrics):
         }
 
         # Cleanup
-        del gpu_data
+        del tensors
         torch.cuda.empty_cache()
 
         return result
@@ -102,27 +112,38 @@ def benchmark_gpu_data_generation(data_size_gb, reference_metrics):
 
 def benchmark_gpu_to_cpu_transfer(data_size_gb, reference_metrics):
     """
-    Transfers a large tensor from the GPU to the CPU to benchmark PCIe bandwidth.
-    - Generates a tensor of size `data_size_gb` GB on the GPU.
-    - Transfers the tensor to the CPU.
+    Transfers large tensors from the GPUs to the CPU to benchmark PCIe bandwidth.
+    - Generates tensors of size `data_size_gb` GB divided equally across GPUs.
+    - Transfers the tensors to the CPU.
     - Measures the time taken for the transfer.
     """
     try:
-        # Calculate total number of elements
-        num_elements = int((data_size_gb * 1e9) / 4)
+        num_gpus = torch.cuda.device_count()
+        if num_gpus > 1:
+            print(f"Using {num_gpus} GPUs for GPU to CPU Transfer")
+        else:
+            print("Using 1 GPU for GPU to CPU Transfer")
 
-        # Generate data on GPU
-        gpu_data = torch.randn(num_elements, device='cuda', dtype=torch.float32)
+        num_elements_per_gpu = int(((data_size_gb * 1e9) / 4) / num_gpus)
 
-        # Transfer data from GPU to CPU
+        gpu_data = []
+        for i in range(num_gpus):
+            with torch.cuda.device(i):
+                data = torch.randn(num_elements_per_gpu, device=f'cuda:{i}', dtype=torch.float32)
+                gpu_data.append(data)
+
         torch.cuda.synchronize()
         start = time.time()
-        cpu_data = gpu_data.cpu()
+
+        cpu_data = []
+        for data in gpu_data:
+            cpu_data.append(data.cpu())
+
         torch.cuda.synchronize()
         end = time.time()
 
         transfer_time = end - start
-        data_size_bytes = num_elements * 4  # float32
+        data_size_bytes = num_elements_per_gpu * 4 * num_gpus  # float32
         data_size_gb_actual = data_size_bytes / 1e9
         transfer_bandwidth = data_size_gb_actual / transfer_time if transfer_time > 0 else float('inf')
 
@@ -148,65 +169,51 @@ def benchmark_gpu_to_cpu_transfer(data_size_gb, reference_metrics):
         return None
 
 def benchmark_cpu_to_disk_write(file_path, data_size_gb, reference_metrics):
-    """
-    Writes a large tensor from the CPU to disk to benchmark disk write performance.
-    - Generates a tensor of size `data_size_gb` GB on the CPU.
-    - Writes the tensor to a binary file.
-    - Measures the time taken to write the data to disk.
-    """
-    try:
-        # Calculate total number of elements
-        num_elements = int((data_size_gb * 1e9) / 4)
+    # Calculate total number of elements
+    num_elements = int((data_size_gb * 1e9) / 4)
 
-        # Generate data on CPU
-        cpu_data = torch.randn(num_elements, dtype=torch.float32)
+    # Generate data on CPU
+    cpu_data = torch.randn(num_elements, dtype=torch.float32)
 
-        # Write data to disk
-        start = time.time()
-        with open(file_path, 'wb') as f:
-            f.write(cpu_data.numpy().tobytes())
-        end = time.time()
+    # Write data to disk
+    start = time.time()
+    with open(file_path, 'wb') as f:
+        f.write(cpu_data.numpy().tobytes())
+    end = time.time()
 
-        write_time = end - start
-        data_size_bytes = num_elements * 4  # float32
-        data_size_gb_actual = data_size_bytes / 1e9
-        write_bandwidth = data_size_gb_actual / write_time if write_time > 0 else float('inf')
+    write_time = end - start
+    data_size_bytes = num_elements * 4  # float32
+    data_size_gb_actual = data_size_bytes / 1e9
+    write_bandwidth = data_size_gb_actual / write_time if write_time > 0 else float('inf')
 
-        result = {
-            'task': 'CPU to Disk Write',
-            'input_params': f'Data Size: {data_size_gb} GB',
-            'data_size_gb': data_size_gb_actual,
-            'time_seconds': write_time,
-            'bandwidth_gb_per_second': write_bandwidth,
-            'execution_time': write_time,
-            'score': (write_bandwidth / reference_metrics['cpu_to_disk_write_bandwidth']) * 100
-        }
+    result = {
+        'task': 'CPU to Disk Write',
+        'data_size_gb': data_size_gb_actual,
+        'time_seconds': write_time,
+        'bandwidth_gb_per_second': write_bandwidth
+    }
 
-        # Cleanup
-        del cpu_data
-        torch.cuda.empty_cache()
+    # Cleanup
+    del cpu_data
+    torch.cuda.empty_cache()
 
-        # Optionally, remove the file after benchmarking
-        if os.path.exists(file_path):
-            os.remove(file_path)
+    # Optionally, remove the file after benchmarking
+    if os.path.exists(file_path):
+        os.remove(file_path)
 
-        return result
-
-    except Exception as e:
-        print(f"Error during CPU to Disk write: {e}")
-        return None
+    return result
 
 def benchmark_computational_task(epochs, batch_size, input_size, hidden_size, output_size, reference_metrics):
     """
     Performs a computationally intensive task to benchmark GPU computational performance.
     - Defines a deep neural network with multiple layers.
-    - Simulates CPU-intensive preprocessing.
+    - Uses DataParallel to utilize multiple GPUs if available.
     - Trains the network for a number of epochs using synthetic data.
-    - Measures the time taken for the CPU preprocessing and GPU training separately.
+    - Measures the time taken for the training.
     - Calculates the approximate GFLOPS achieved during training.
     """
     try:
-        # Define a more complex neural network
+        # Define the neural network
         class ComplexNet(nn.Module):
             def __init__(self, input_size, hidden_size, output_size):
                 super(ComplexNet, self).__init__()
@@ -224,27 +231,23 @@ def benchmark_computational_task(epochs, batch_size, input_size, hidden_size, ou
                 x = self.layers[-1](x)
                 return x
 
-        # Initialize model, loss function, and optimizer
-        model = ComplexNet(input_size, hidden_size, output_size).cuda()
+        model = ComplexNet(input_size, hidden_size, output_size)
+
+        num_gpus = torch.cuda.device_count()
+        if num_gpus > 1:
+            print(f"Using {num_gpus} GPUs for Computationally Intensive Task")
+            model = nn.DataParallel(model)
+        else:
+            print("Using 1 GPU for Computationally Intensive Task")
+
+        model = model.cuda()
+
         criterion = nn.MSELoss().cuda()
         optimizer = optim.Adam(model.parameters(), lr=0.001)
 
         # Generate random input and target tensors
         inputs = torch.randn(batch_size, input_size, device='cuda')
         targets = torch.randn(batch_size, output_size, device='cuda')
-
-        # CPU-intensive task: Data preprocessing (simulated)
-        cpu_start = time.time()
-        preprocessed_data = torch.randn(batch_size, input_size)
-        for _ in range(100):  # Increase the loop to consume more CPU time
-            preprocessed_data += torch.randn(batch_size, input_size)
-        cpu_end = time.time()
-        cpu_time = cpu_end - cpu_start
-
-        # Transfer preprocessed data to GPU
-        torch.cuda.synchronize()
-        inputs = preprocessed_data.to('cuda')
-        torch.cuda.synchronize()
 
         # Warm-up
         torch.cuda.synchronize()
@@ -271,7 +274,8 @@ def benchmark_computational_task(epochs, batch_size, input_size, hidden_size, ou
         # Adjusted FLOPS calculation
         # Total FLOPs per epoch (approximate): 2 * number of operations in forward pass
         total_operations = 0
-        for layer in model.layers:
+        model_layers = model.module.layers if num_gpus > 1 else model.layers
+        for layer in model_layers:
             if isinstance(layer, nn.Linear):
                 in_features = layer.in_features
                 out_features = layer.out_features
@@ -293,12 +297,10 @@ def benchmark_computational_task(epochs, batch_size, input_size, hidden_size, ou
             'input_size': input_size,
             'hidden_size': hidden_size,
             'output_size': output_size,
-            'num_layers': len(model.layers),
-            'cpu_time_seconds': cpu_time,
+            'num_layers': len(model_layers),
             'gpu_time_seconds': total_time,
-            'total_time_seconds': cpu_time + total_time,
             'performance_gflops': gflops,
-            'execution_time': cpu_time + total_time,
+            'execution_time': total_time,
             'score': (gflops / reference_metrics['computational_task_gflops']) * 100
         }
 
@@ -318,6 +320,7 @@ def benchmark_inference_performance(model_size, batch_size, input_size, output_s
     """
     Measures the inference latency and throughput of a neural network model.
     - Uses a convolutional neural network with specified depth.
+    - Uses DataParallel to utilize multiple GPUs if available.
     - Runs inference for a number of iterations and measures latency and throughput.
     """
     try:
@@ -352,8 +355,16 @@ def benchmark_inference_performance(model_size, batch_size, input_size, output_s
         num_classes = output_size
         depth = model_size
 
-        # Initialize model
-        model = ConvNet(input_channels, num_classes, depth).cuda()
+        model = ConvNet(input_channels, num_classes, depth)
+
+        num_gpus = torch.cuda.device_count()
+        if num_gpus > 1:
+            print(f"Using {num_gpus} GPUs for Inference Performance")
+            model = nn.DataParallel(model)
+        else:
+            print("Using 1 GPU for Inference Performance")
+
+        model = model.cuda()
         model.eval()  # Set model to evaluation mode
 
         # Generate random input tensor simulating high-resolution images
@@ -376,8 +387,9 @@ def benchmark_inference_performance(model_size, batch_size, input_size, output_s
             end_time = time.time()
             times.append(end_time - start_time)
 
-        avg_latency = sum(times) / len(times)
-        throughput = batch_size / avg_latency  # Samples per second
+        total_inference_time = sum(times)
+        avg_latency = total_inference_time / iterations
+        throughput = (batch_size * iterations) / total_inference_time  # Samples per second
 
         input_params = (f"Model Size: {model_size}, Batch Size: {batch_size}, Input Size: {input_size}, "
                         f"Output Size: {output_size}, Iterations: {iterations}")
@@ -387,7 +399,7 @@ def benchmark_inference_performance(model_size, batch_size, input_size, output_s
             'input_params': input_params,
             'average_latency_seconds': avg_latency,
             'throughput_samples_per_second': throughput,
-            'execution_time': sum(times),
+            'execution_time': total_inference_time,
             'score': (throughput / reference_metrics['inference_throughput']) * 100
         }
 
@@ -515,7 +527,6 @@ def benchmark_disk_io(file_path, data_size_gb, block_size_kb, io_depth, num_jobs
         return None
 
 def start_gpu_logging(log_file, log_metrics):
-    # [Function remains the same as before]
     metrics = log_metrics.split(',')
     query_fields = ','.join(metrics)
     log_cmd = [
@@ -535,7 +546,6 @@ def start_gpu_logging(log_file, log_metrics):
         return None
 
 def stop_gpu_logging(log_process):
-    # [Function remains the same as before]
     try:
         if log_process:
             # Send termination signal
@@ -546,7 +556,6 @@ def stop_gpu_logging(log_process):
         print(f"Error stopping GPU logging: {e}")
 
 def print_detailed_results(results):
-    # [Function remains the same as before]
     for result in results:
         if result is None:
             continue
@@ -684,7 +693,18 @@ def main():
     parser.add_argument('--cpu-to-disk-write', action='store_true', help='Run CPU to Disk Write benchmark')
     parser.add_argument('--computational-task', action='store_true', help='Run Computationally Intensive Task benchmark')
 
+    # Argument to specify GPUs
+    parser.add_argument('--gpus', type=str, default=None,
+                        help='Comma-separated list of GPU IDs to use (e.g., "0,1,2,3"). If not set, use all available GPUs.')
+
     args = parser.parse_args()
+
+    # Set CUDA_VISIBLE_DEVICES before any CUDA operations
+    if args.gpus is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
+        print(f"Using GPUs: {args.gpus}")
+    else:
+        print("Using all available GPUs")
 
     torch.backends.cudnn.benchmark = True  # Enable cuDNN autotuner
 
