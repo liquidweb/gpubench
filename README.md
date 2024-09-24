@@ -150,6 +150,6 @@ This project is licensed under the GNU GPL v3 License. See the LICENSE file for 
 
 ```
 Licensed under the GNU GPL v3.
-Copyright (C) 2023 Liquid Web, LLC <deveng@liquidweb.com>
+Copyright (C) 2024 Liquid Web, LLC <deveng@liquidweb.com>
 Ryan MacDonald <rmacdonald@liquidweb.com>
 ```
