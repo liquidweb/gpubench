@@ -13,6 +13,11 @@ import torch.optim as optim
 import psutil
 import GPUtil
 import textwrap
+import hashlib
+import gzip
+import threading
+import concurrent.futures
+import numpy as np
 from tabulate import tabulate
 
 def get_system_info():
@@ -169,39 +174,55 @@ def benchmark_gpu_to_cpu_transfer(data_size_gb, reference_metrics):
         return None
 
 def benchmark_cpu_to_disk_write(file_path, data_size_gb, reference_metrics):
-    # Calculate total number of elements
-    num_elements = int((data_size_gb * 1e9) / 4)
+    """
+    Writes data from CPU to disk to benchmark disk write performance.
+    - Generates a large tensor on the CPU.
+    - Writes the tensor to disk.
+    - Measures the time taken for the write operation.
+    """
+    try:
+        # Calculate total number of elements
+        num_elements = int((data_size_gb * 1e9) / 4)
 
-    # Generate data on CPU
-    cpu_data = torch.randn(num_elements, dtype=torch.float32)
+        # Generate data on CPU
+        cpu_data = torch.randn(num_elements, dtype=torch.float32)
 
-    # Write data to disk
-    start = time.time()
-    with open(file_path, 'wb') as f:
-        f.write(cpu_data.numpy().tobytes())
-    end = time.time()
+        # Write data to disk
+        start = time.time()
+        with open(file_path, 'wb') as f:
+            f.write(cpu_data.numpy().tobytes())
+        end = time.time()
 
-    write_time = end - start
-    data_size_bytes = num_elements * 4  # float32
-    data_size_gb_actual = data_size_bytes / 1e9
-    write_bandwidth = data_size_gb_actual / write_time if write_time > 0 else float('inf')
+        write_time = end - start
+        data_size_bytes = num_elements * 4  # float32
+        data_size_gb_actual = data_size_bytes / 1e9
+        write_bandwidth = data_size_gb_actual / write_time if write_time > 0 else float('inf')
 
-    result = {
-        'task': 'CPU to Disk Write',
-        'data_size_gb': data_size_gb_actual,
-        'time_seconds': write_time,
-        'bandwidth_gb_per_second': write_bandwidth
-    }
+        input_params = f'Data Size: {data_size_gb} GB'
 
-    # Cleanup
-    del cpu_data
-    torch.cuda.empty_cache()
+        result = {
+            'task': 'CPU to Disk Write',
+            'input_params': input_params,
+            'data_size_gb': data_size_gb_actual,
+            'time_seconds': write_time,
+            'bandwidth_gb_per_second': write_bandwidth,
+            'execution_time': write_time,
+            'score': (write_bandwidth / reference_metrics['cpu_to_disk_write_bandwidth']) * 100
+        }
 
-    # Optionally, remove the file after benchmarking
-    if os.path.exists(file_path):
-        os.remove(file_path)
+        # Cleanup
+        del cpu_data
+        torch.cuda.empty_cache()
 
-    return result
+        # Optionally, remove the file after benchmarking
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+        return result
+
+    except Exception as e:
+        print(f"Error during CPU to Disk Write benchmarking: {e}")
+        return None
 
 def benchmark_computational_task(epochs, batch_size, input_size, hidden_size, output_size, reference_metrics):
     """
@@ -213,6 +234,9 @@ def benchmark_computational_task(epochs, batch_size, input_size, hidden_size, ou
     - Calculates the approximate GFLOPS achieved during training.
     """
     try:
+        # Initialize CUDA context
+        torch.cuda.current_device()
+
         # Define the neural network
         class ComplexNet(nn.Module):
             def __init__(self, input_size, hidden_size, output_size):
@@ -236,11 +260,10 @@ def benchmark_computational_task(epochs, batch_size, input_size, hidden_size, ou
         num_gpus = torch.cuda.device_count()
         if num_gpus > 1:
             print(f"Using {num_gpus} GPUs for Computationally Intensive Task")
-            model = nn.DataParallel(model)
+            model = nn.DataParallel(model).cuda()
         else:
             print("Using 1 GPU for Computationally Intensive Task")
-
-        model = model.cuda()
+            model = model.cuda()
 
         criterion = nn.MSELoss().cuda()
         optimizer = optim.Adam(model.parameters(), lr=0.001)
@@ -360,11 +383,11 @@ def benchmark_inference_performance(model_size, batch_size, input_size, output_s
         num_gpus = torch.cuda.device_count()
         if num_gpus > 1:
             print(f"Using {num_gpus} GPUs for Inference Performance")
-            model = nn.DataParallel(model)
+            model = nn.DataParallel(model).cuda()
         else:
             print("Using 1 GPU for Inference Performance")
+            model = model.cuda()
 
-        model = model.cuda()
         model.eval()  # Set model to evaluation mode
 
         # Generate random input tensor simulating high-resolution images
@@ -422,15 +445,17 @@ def benchmark_disk_io(file_path, data_size_gb, block_size_kb, io_depth, num_jobs
     """
     try:
         # Convert sizes to appropriate units
-        data_size_bytes = int(data_size_gb * 1e9)
         block_size_bytes = block_size_kb * 1024
+
+        # Calculate data size in bytes
+        data_size_bytes = int(data_size_gb * 1e9)
 
         # Ensure that data size is at least equal to block size
         if data_size_bytes < block_size_bytes:
             data_size_bytes = block_size_bytes
-            data_size_gb = data_size_bytes / 1e9
-            print(f"Adjusted data size to {data_size_gb} GB to be at least equal to block size.")
+            print(f"Adjusted data size to {data_size_bytes} bytes to be at least equal to block size.")
 
+        data_size = f'{data_size_bytes}'
         block_size = f'{block_size_kb}K'
 
         # Define tests to run
@@ -452,7 +477,7 @@ def benchmark_disk_io(file_path, data_size_gb, block_size_kb, io_depth, num_jobs
                 f'--filename={file_path}',
                 '--ioengine=libaio',
                 f'--rw={test["rw"]}',
-                f'--size={data_size_bytes}',
+                f'--size={data_size}',
                 f'--bs={block_size}',
                 f'--iodepth={test["iodepth"]}',
                 f'--numjobs={test["numjobs"]}',
@@ -499,7 +524,7 @@ def benchmark_disk_io(file_path, data_size_gb, block_size_kb, io_depth, num_jobs
             if os.path.exists(f'{test["name"]}_output.json'):
                 os.remove(f'{test["name"]}_output.json')
 
-        input_params = (f"Data Size: {data_size_gb} GB, Block Size: {block_size_kb} KB, "
+        input_params = (f"Data Size: {data_size_bytes} bytes, Block Size: {block_size_kb} KB, "
                         f"IO Depth: {io_depth}, Num Jobs: {num_jobs}")
 
         result = {
@@ -524,6 +549,205 @@ def benchmark_disk_io(file_path, data_size_gb, block_size_kb, io_depth, num_jobs
 
     except Exception as e:
         print(f"Error during disk I/O benchmarking: {e}")
+        return None
+
+def benchmark_cpu_single_thread(reference_metrics):
+    """
+    Performs single-threaded CPU benchmarks covering computational, cryptographic, and data processing tasks.
+    - Computational: Calculates large Fibonacci numbers using recursion.
+    - Cryptographic: Computes SHA-256 hashes of large data blocks.
+    - Data Processing: Compresses and decompresses data using gzip.
+    """
+    try:
+        total_time = 0.0
+        # Computational Task: Fibonacci Calculation
+        def fibonacci(n):
+            if n <= 1:
+                return n
+            else:
+                return fibonacci(n - 1) + fibonacci(n - 2)
+        n = 35  # Adjust for desired computation time
+        start_time = time.time()
+        fib_result = fibonacci(n)
+        comp_time = time.time() - start_time
+        total_time += comp_time
+
+        # Cryptographic Task: SHA-256 Hashing
+        data_size_mb = 100
+        data = os.urandom(data_size_mb * 1024 * 1024)  # Generate random data
+        start_time = time.time()
+        hash_result = hashlib.sha256(data).hexdigest()
+        crypto_time = time.time() - start_time
+        total_time += crypto_time
+
+        # Data Processing Task: Gzip Compression/Decompression
+        start_time = time.time()
+        compressed_data = gzip.compress(data)
+        decompressed_data = gzip.decompress(compressed_data)
+        data_proc_time = time.time() - start_time
+        total_time += data_proc_time
+
+        # Calculate performance metrics
+        comp_perf = n / comp_time  # Fibonacci number per second
+        crypto_perf = (data_size_mb / crypto_time)  # MB hashed per second
+        data_proc_perf = (data_size_mb / data_proc_time)  # MB processed per second
+
+        input_params = "Single-threaded CPU Benchmark"
+
+        result = {
+            'task': 'CPU Single-threaded Performance',
+            'input_params': input_params,
+            'fib_number': n,
+            'fib_result': fib_result,
+            'comp_time_seconds': comp_time,
+            'comp_perf': comp_perf,
+            'crypto_data_size_mb': data_size_mb,
+            'crypto_time_seconds': crypto_time,
+            'crypto_perf_mb_per_sec': crypto_perf,
+            'data_proc_time_seconds': data_proc_time,
+            'data_proc_perf_mb_per_sec': data_proc_perf,
+            'execution_time': total_time,
+            'score': ((comp_perf / reference_metrics['cpu_single_thread_comp_perf']) +
+                      (crypto_perf / reference_metrics['cpu_single_thread_crypto_perf']) +
+                      (data_proc_perf / reference_metrics['cpu_single_thread_data_proc_perf'])) * 100 / 3
+        }
+
+        # Cleanup
+        del data
+        del compressed_data
+        del decompressed_data
+
+        return result
+
+    except Exception as e:
+        print(f"Error during single-threaded CPU benchmarking: {e}")
+        return None
+
+def benchmark_cpu_multi_thread(reference_metrics, num_threads):
+    """
+    Performs multi-threaded CPU benchmarks covering computational, cryptographic, and data processing tasks.
+    - Computational: Calculates large Fibonacci numbers using recursion.
+    - Cryptographic: Computes SHA-256 hashes of large data blocks.
+    - Data Processing: Compresses and decompresses data using gzip.
+    """
+    try:
+        total_time = 0.0
+
+        # Computational Task: Fibonacci Calculation
+        def fibonacci(n):
+            if n <= 1:
+                return n
+            else:
+                return fibonacci(n - 1) + fibonacci(n - 2)
+
+        n = 35  # Adjust for desired computation time
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+            start_time = time.time()
+            futures = [executor.submit(fibonacci, n) for _ in range(num_threads)]
+            fib_results = [f.result() for f in futures]
+            comp_time = time.time() - start_time
+        total_time += comp_time
+
+        # Cryptographic Task: SHA-256 Hashing
+        data_size_mb = 100
+        data_blocks = [os.urandom(data_size_mb * 1024 * 1024) for _ in range(num_threads)]
+        def hash_data(data_block):
+            return hashlib.sha256(data_block).hexdigest()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+            start_time = time.time()
+            hash_results = list(executor.map(hash_data, data_blocks))
+            crypto_time = time.time() - start_time
+        total_time += crypto_time
+
+        # Data Processing Task: Gzip Compression/Decompression
+        def compress_decompress(data_block):
+            compressed = gzip.compress(data_block)
+            decompressed = gzip.decompress(compressed)
+            return decompressed
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+            start_time = time.time()
+            decompressed_results = list(executor.map(compress_decompress, data_blocks))
+            data_proc_time = time.time() - start_time
+        total_time += data_proc_time
+
+        # Calculate performance metrics
+        comp_perf = (n * num_threads) / comp_time  # Fibonacci numbers per second
+        crypto_perf = (data_size_mb * num_threads) / crypto_time  # MB hashed per second
+        data_proc_perf = (data_size_mb * num_threads) / data_proc_time  # MB processed per second
+
+        input_params = f"Multi-threaded CPU Benchmark with {num_threads} threads"
+
+        result = {
+            'task': 'CPU Multi-threaded Performance',
+            'input_params': input_params,
+            'fib_number': n,
+            'comp_time_seconds': comp_time,
+            'comp_perf': comp_perf,
+            'crypto_data_size_mb': data_size_mb * num_threads,
+            'crypto_time_seconds': crypto_time,
+            'crypto_perf_mb_per_sec': crypto_perf,
+            'data_proc_time_seconds': data_proc_time,
+            'data_proc_perf_mb_per_sec': data_proc_perf,
+            'execution_time': total_time,
+            'score': ((comp_perf / reference_metrics['cpu_multi_thread_comp_perf']) +
+                      (crypto_perf / reference_metrics['cpu_multi_thread_crypto_perf']) +
+                      (data_proc_perf / reference_metrics['cpu_multi_thread_data_proc_perf'])) * 100 / 3
+        }
+
+        # Cleanup
+        del data_blocks
+        del decompressed_results
+
+        return result
+
+    except Exception as e:
+        print(f"Error during multi-threaded CPU benchmarking: {e}")
+        return None
+
+def benchmark_memory_bandwidth(memory_size_mb, reference_metrics):
+    """
+    Measures memory bandwidth by performing large memory copy operations.
+    - Allocates large numpy arrays and measures the time to copy them.
+    """
+    try:
+        data_size = memory_size_mb * 1024 * 1024  # Convert MB to bytes
+        array_size = data_size // 8  # Number of elements (float64)
+
+        # Generate data
+        src_array = np.random.rand(array_size)
+
+        # Warm-up
+        dest_array = np.copy(src_array)
+
+        # Measure memory copy bandwidth
+        start_time = time.time()
+        dest_array = np.copy(src_array)
+        end_time = time.time()
+
+        copy_time = end_time - start_time
+        bandwidth_gb_per_sec = (data_size / copy_time) / 1e9
+
+        input_params = f"Memory Size: {memory_size_mb} MB"
+
+        result = {
+            'task': 'Memory Bandwidth',
+            'input_params': input_params,
+            'memory_size_mb': memory_size_mb,
+            'copy_time_seconds': copy_time,
+            'bandwidth_gb_per_sec': bandwidth_gb_per_sec,
+            'execution_time': copy_time,
+            'score': (bandwidth_gb_per_sec / reference_metrics['memory_bandwidth_gb_per_sec']) * 100
+        }
+
+        # Cleanup
+        del src_array
+        del dest_array
+
+        return result
+
+    except Exception as e:
+        print(f"Error during memory bandwidth benchmarking: {e}")
         return None
 
 def start_gpu_logging(log_file, log_metrics):
@@ -597,6 +821,20 @@ def print_results_table(results, total_score, total_execution_time):
                 f"Rand Read IOPS: {int(result.get('random_read_iops', 0))}, "
                 f"Rand Write IOPS: {int(result.get('random_write_iops', 0))}"
             )
+        elif task == 'CPU Single-threaded Performance':
+            metric = (
+                f"Comp Perf: {result['comp_perf']:.2f} fib/sec, "
+                f"Crypto Perf: {result['crypto_perf_mb_per_sec']:.2f} MB/s, "
+                f"Data Proc Perf: {result['data_proc_perf_mb_per_sec']:.2f} MB/s"
+            )
+        elif task == 'CPU Multi-threaded Performance':
+            metric = (
+                f"Comp Perf: {result['comp_perf']:.2f} fib/sec, "
+                f"Crypto Perf: {result['crypto_perf_mb_per_sec']:.2f} MB/s, "
+                f"Data Proc Perf: {result['data_proc_perf_mb_per_sec']:.2f} MB/s"
+            )
+        elif task == 'Memory Bandwidth':
+            metric = f"Bandwidth: {result['bandwidth_gb_per_sec']:.2f} GB/s"
         else:
             metric = 'N/A'
 
@@ -626,7 +864,7 @@ def print_results_table(results, total_score, total_execution_time):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='GPU Benchmarking Script with Inference and Disk I/O Tests',
+        description='GPU Benchmarking Script with CPU and Memory Bandwidth Tests',
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument('--json', action='store_true',
@@ -693,6 +931,16 @@ def main():
     parser.add_argument('--cpu-to-disk-write', action='store_true', help='Run CPU to Disk Write benchmark')
     parser.add_argument('--computational-task', action='store_true', help='Run Computationally Intensive Task benchmark')
 
+    # New flags for CPU and memory benchmarks
+    parser.add_argument('--cpu-single-thread', action='store_true', help='Run CPU Single-threaded Performance benchmark')
+    parser.add_argument('--cpu-multi-thread', action='store_true', help='Run CPU Multi-threaded Performance benchmark')
+    parser.add_argument('--cpu-num-threads', type=int, default=psutil.cpu_count(logical=True),
+                        help='Number of threads to use for multi-threaded CPU benchmark (default: all logical cores)')
+
+    parser.add_argument('--memory-bandwidth', action='store_true', help='Run Memory Bandwidth benchmark')
+    parser.add_argument('--memory-size-mb', type=int, default=1024,
+                        help='Memory size in MB for memory bandwidth benchmark (default: 1024)')
+
     # Argument to specify GPUs
     parser.add_argument('--gpus', type=str, default=None,
                         help='Comma-separated list of GPU IDs to use (e.g., "0,1,2,3"). If not set, use all available GPUs.')
@@ -709,7 +957,17 @@ def main():
     torch.backends.cudnn.benchmark = True  # Enable cuDNN autotuner
 
     # Determine which benchmarks to run
-    if not any([args.inference, args.disk_io, args.gpu_data_gen, args.gpu_to_cpu_transfer, args.cpu_to_disk_write, args.computational_task]):
+    if not any([
+        args.inference,
+        args.disk_io,
+        args.gpu_data_gen,
+        args.gpu_to_cpu_transfer,
+        args.cpu_to_disk_write,
+        args.computational_task,
+        args.cpu_single_thread,
+        args.cpu_multi_thread,
+        args.memory_bandwidth
+    ]):
         # No specific benchmarks specified, so run all
         run_inference = True
         run_disk_io = True
@@ -717,6 +975,9 @@ def main():
         run_gpu_to_cpu_transfer = True
         run_cpu_to_disk_write = True
         run_computational_task = True
+        run_cpu_single_thread = True
+        run_cpu_multi_thread = True
+        run_memory_bandwidth = True
     else:
         run_inference = args.inference
         run_disk_io = args.disk_io
@@ -724,6 +985,9 @@ def main():
         run_gpu_to_cpu_transfer = args.gpu_to_cpu_transfer
         run_cpu_to_disk_write = args.cpu_to_disk_write
         run_computational_task = args.computational_task
+        run_cpu_single_thread = args.cpu_single_thread
+        run_cpu_multi_thread = args.cpu_multi_thread
+        run_memory_bandwidth = args.memory_bandwidth
 
     # Start total execution timer
     total_start_time = time.time()
@@ -753,6 +1017,13 @@ def main():
         'inference_throughput': 13000.0,           # Samples per second
         'sequential_read_throughput_mb_per_sec': 110.0,    # MB/s
         'random_read_iops': 24000.0,               # IOPS
+        'cpu_single_thread_comp_perf': 1.0,        # Fibonacci numbers per second (example value)
+        'cpu_single_thread_crypto_perf': 50.0,     # MB/s (example value)
+        'cpu_single_thread_data_proc_perf': 50.0,  # MB/s (example value)
+        'cpu_multi_thread_comp_perf': 10.0,        # Fibonacci numbers per second (example value)
+        'cpu_multi_thread_crypto_perf': 500.0,     # MB/s (example value)
+        'cpu_multi_thread_data_proc_perf': 500.0,  # MB/s (example value)
+        'memory_bandwidth_gb_per_sec': 10.0,       # GB/s (example value)
     }
 
     # Run benchmarks for N iterations
@@ -819,6 +1090,21 @@ def main():
                 reference_metrics=reference_metrics
             )
             results.append(disk_result)
+
+        if run_cpu_single_thread:
+            print("Running CPU Single-threaded Performance benchmark...")
+            cpu_single_thread_result = benchmark_cpu_single_thread(reference_metrics)
+            results.append(cpu_single_thread_result)
+
+        if run_cpu_multi_thread:
+            print("Running CPU Multi-threaded Performance benchmark...")
+            cpu_multi_thread_result = benchmark_cpu_multi_thread(reference_metrics, args.cpu_num_threads)
+            results.append(cpu_multi_thread_result)
+
+        if run_memory_bandwidth:
+            print("Running Memory Bandwidth benchmark...")
+            memory_bandwidth_result = benchmark_memory_bandwidth(args.memory_size_mb, reference_metrics)
+            results.append(memory_bandwidth_result)
 
         all_results.extend(results)
 
