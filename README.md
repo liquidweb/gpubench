@@ -2,9 +2,9 @@
 # GPUBench
 
 ## Overview
-GPUBench is a highly versatile and efficient benchmarking tool designed to measure the performance of various computational resources, including GPUs, CPUs, memory, and disk I/O. 
-It provides detailed insights into the system's capability to handle AI/ML tasks, especially in high-performance computing environments. 
-This tool is particularly useful for AI/ML engineers, data scientists, and system administrators who need to ensure optimal performance in their computing infrastructure.
+GPUBench is a flexible tool built to test the performance of key hardware components including GPUs, CPUs, memory, and disk storage. It helps evaluate how well a system can handle AI and machine learning workloads, making it a valuable resource for engineers, data scientists, and system admins who want to optimize their computing setup. Ideal for ensuring everything runs smoothly in demanding environments, especially where high-performance matters most.
+
+With comparative scoring, users can benchmark similar systems to ensure consistency, compare newer or dissimilar hardware to assess performance differences, and evaluate PaaS/IaaS providers against each other to achieve the optimal performance:$ ratio.
 
 ### Key Features:
 - **GPU Memory Bandwidth**: Measure memory allocation and bandwidth across multiple GPUs.
