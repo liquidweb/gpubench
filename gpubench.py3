@@ -4,21 +4,33 @@ import os
 import sys
 import time
 import json
-import torch
 import argparse
 import platform
 import subprocess
-import torch.nn as nn
-import torch.optim as optim
-import psutil
-import GPUtil
 import textwrap
-import hashlib
-import gzip
 import threading
 import concurrent.futures
+import hashlib
+import gzip
 import numpy as np
+import psutil
+import GPUtil
+import torch
+import torch.nn as nn
+import torch.optim as optim
 from tabulate import tabulate
+
+# Try to import additional libraries
+try:
+    import torchvision.models as models
+except ImportError:
+    models = None
+
+try:
+    from transformers import BertModel, BertConfig, GPT2Model, GPT2Config
+except ImportError:
+    BertModel = None
+    GPT2Model = None
 
 def get_system_info():
     # CPU Information
@@ -69,6 +81,10 @@ def benchmark_gpu_data_generation(data_size_gb, reference_metrics):
     """
     try:
         num_gpus = torch.cuda.device_count()
+        if num_gpus == 0:
+            print("No GPUs available for GPU Data Generation benchmark.")
+            return None
+
         if num_gpus > 1:
             print(f"Using {num_gpus} GPUs for GPU Data Generation")
         else:
@@ -124,6 +140,10 @@ def benchmark_gpu_to_cpu_transfer(data_size_gb, reference_metrics):
     """
     try:
         num_gpus = torch.cuda.device_count()
+        if num_gpus == 0:
+            print("No GPUs available for GPU to CPU Transfer benchmark.")
+            return None
+
         if num_gpus > 1:
             print(f"Using {num_gpus} GPUs for GPU to CPU Transfer")
         else:
@@ -235,6 +255,10 @@ def benchmark_computational_task(epochs, batch_size, input_size, hidden_size, ou
     """
     try:
         # Initialize CUDA context
+        if not torch.cuda.is_available():
+            print("CUDA is not available. Cannot benchmark Computationally Intensive Task.")
+            return None
+
         torch.cuda.current_device()
 
         # Define the neural network
@@ -258,6 +282,10 @@ def benchmark_computational_task(epochs, batch_size, input_size, hidden_size, ou
         model = ComplexNet(input_size, hidden_size, output_size)
 
         num_gpus = torch.cuda.device_count()
+        if num_gpus == 0:
+            print("No GPUs available for Computationally Intensive Task benchmark.")
+            return None
+
         if num_gpus > 1:
             print(f"Using {num_gpus} GPUs for Computationally Intensive Task")
             model = nn.DataParallel(model).cuda()
@@ -347,6 +375,10 @@ def benchmark_inference_performance(model_size, batch_size, input_size, output_s
     - Runs inference for a number of iterations and measures latency and throughput.
     """
     try:
+        if not torch.cuda.is_available():
+            print("CUDA is not available. Cannot benchmark Inference Performance.")
+            return None
+
         # Calculate the maximum depth based on input size to prevent output size from becoming zero
         max_depth = int(torch.log2(torch.tensor(input_size / 4)))  # Adjusted to prevent output size from being zero
         if model_size > max_depth:
@@ -381,6 +413,10 @@ def benchmark_inference_performance(model_size, batch_size, input_size, output_s
         model = ConvNet(input_channels, num_classes, depth)
 
         num_gpus = torch.cuda.device_count()
+        if num_gpus == 0:
+            print("No GPUs available for Inference Performance benchmark.")
+            return None
+
         if num_gpus > 1:
             print(f"Using {num_gpus} GPUs for Inference Performance")
             model = nn.DataParallel(model).cuda()
@@ -534,12 +570,14 @@ def benchmark_disk_io(file_path, data_size_gb, block_size_kb, io_depth, num_jobs
             **results
         }
 
-        # Calculate scores based on sequential read throughput and random read IOPS
+        # Calculate scores based on sequential read/write throughput and random read/write IOPS
         seq_read_throughput_score = (results['sequential_read_throughput_mb_per_sec'] / reference_metrics['sequential_read_throughput_mb_per_sec']) * 100
+        seq_write_throughput_score = (results['sequential_write_throughput_mb_per_sec'] / reference_metrics['sequential_write_throughput_mb_per_sec']) * 100
         rand_read_iops_score = (results['random_read_iops'] / reference_metrics['random_read_iops']) * 100
+        rand_write_iops_score = (results['random_write_iops'] / reference_metrics['random_write_iops']) * 100
 
         # Average the scores
-        result['score'] = (seq_read_throughput_score + rand_read_iops_score) / 2
+        result['score'] = (seq_read_throughput_score + seq_write_throughput_score + rand_read_iops_score + rand_write_iops_score) / 4
 
         # Cleanup
         if os.path.exists(file_path):
@@ -550,7 +588,6 @@ def benchmark_disk_io(file_path, data_size_gb, block_size_kb, io_depth, num_jobs
     except Exception as e:
         print(f"Error during disk I/O benchmarking: {e}")
         return None
-
 def benchmark_cpu_single_thread(reference_metrics):
     """
     Performs single-threaded CPU benchmarks covering computational, cryptographic, and data processing tasks.
@@ -750,6 +787,303 @@ def benchmark_memory_bandwidth(memory_size_mb, reference_metrics):
         print(f"Error during memory bandwidth benchmarking: {e}")
         return None
 
+def benchmark_resnet_inference(batch_size, input_size, iterations, reference_metrics):
+    """
+    Benchmarks the inference performance of a ResNet50 model.
+    """
+    try:
+        if models is None:
+            print("torchvision is not installed. Cannot benchmark ResNet50 inference.")
+            return None
+
+        if not torch.cuda.is_available():
+            print("CUDA is not available. Cannot benchmark ResNet50 inference.")
+            return None
+
+        # Updated to use 'weights=None' to avoid deprecation warnings
+        model = models.resnet50(weights=None).cuda()
+        model.eval()
+
+        inputs = torch.randn(batch_size, 3, input_size, input_size, device='cuda')
+
+        # Warm-up
+        with torch.no_grad():
+            model(inputs)
+
+        torch.cuda.synchronize()
+
+        # Measure inference time over multiple iterations
+        times = []
+        for _ in range(iterations):
+            torch.cuda.synchronize()
+            start_time = time.time()
+            with torch.no_grad():
+                outputs = model(inputs)
+            torch.cuda.synchronize()
+            end_time = time.time()
+            times.append(end_time - start_time)
+
+        total_inference_time = sum(times)
+        avg_latency = total_inference_time / iterations
+        throughput = (batch_size * iterations) / total_inference_time  # Samples per second
+
+        input_params = f"Model: ResNet50, Batch Size: {batch_size}, Input Size: {input_size}, Iterations: {iterations}"
+
+        result = {
+            'task': 'ResNet50 Inference',
+            'input_params': input_params,
+            'average_latency_seconds': avg_latency,
+            'throughput_samples_per_second': throughput,
+            'execution_time': total_inference_time,
+            'score': (throughput / reference_metrics['resnet_inference_throughput']) * 100
+        }
+
+        # Cleanup
+        del model
+        del inputs
+        torch.cuda.empty_cache()
+
+        return result
+
+    except Exception as e:
+        print(f"Error during ResNet50 inference benchmarking: {e}")
+        return None
+
+def benchmark_bert_inference(batch_size, seq_length, iterations, reference_metrics):
+    """
+    Benchmarks the inference performance of a BERT model.
+    """
+    try:
+        if BertModel is None:
+            print("Transformers library is not installed. Cannot benchmark BERT inference.")
+            return None
+
+        if not torch.cuda.is_available():
+            print("CUDA is not available. Cannot benchmark BERT inference.")
+            return None
+
+        config = BertConfig()
+        model = BertModel(config).cuda()
+        model.eval()
+
+        inputs = {
+            'input_ids': torch.randint(0, config.vocab_size, (batch_size, seq_length), device='cuda'),
+            'attention_mask': torch.ones(batch_size, seq_length, device='cuda')
+        }
+
+        # Warm-up
+        with torch.no_grad():
+            model(**inputs)
+
+        torch.cuda.synchronize()
+
+        # Measure inference time over multiple iterations
+        times = []
+        for _ in range(iterations):
+            torch.cuda.synchronize()
+            start_time = time.time()
+            with torch.no_grad():
+                outputs = model(**inputs)
+            torch.cuda.synchronize()
+            end_time = time.time()
+            times.append(end_time - start_time)
+
+        total_inference_time = sum(times)
+        avg_latency = total_inference_time / iterations
+        throughput = (batch_size * iterations) / total_inference_time  # Samples per second
+
+        input_params = f"Model: BERT, Batch Size: {batch_size}, Sequence Length: {seq_length}, Iterations: {iterations}"
+
+        result = {
+            'task': 'BERT Inference',
+            'input_params': input_params,
+            'average_latency_seconds': avg_latency,
+            'throughput_samples_per_second': throughput,
+            'execution_time': total_inference_time,
+            'score': (throughput / reference_metrics['bert_inference_throughput']) * 100
+        }
+
+        # Cleanup
+        del model
+        del inputs
+        torch.cuda.empty_cache()
+
+        return result
+
+    except Exception as e:
+        print(f"Error during BERT inference benchmarking: {e}")
+        return None
+
+def benchmark_gpt_inference(batch_size, seq_length, iterations, reference_metrics):
+    """
+    Benchmarks the inference performance of a GPT-2 model.
+    """
+    try:
+        if GPT2Model is None:
+            print("Transformers library is not installed. Cannot benchmark GPT-2 inference.")
+            return None
+
+        if not torch.cuda.is_available():
+            print("CUDA is not available. Cannot benchmark GPT-2 inference.")
+            return None
+
+        config = GPT2Config()
+        model = GPT2Model(config).cuda()
+        model.eval()
+
+        inputs = {
+            'input_ids': torch.randint(0, config.vocab_size, (batch_size, seq_length), device='cuda'),
+        }
+
+        # Warm-up
+        with torch.no_grad():
+            model(**inputs)
+
+        torch.cuda.synchronize()
+
+        # Measure inference time over multiple iterations
+        times = []
+        for _ in range(iterations):
+            torch.cuda.synchronize()
+            start_time = time.time()
+            with torch.no_grad():
+                outputs = model(**inputs)
+            torch.cuda.synchronize()
+            end_time = time.time()
+            times.append(end_time - start_time)
+
+        total_inference_time = sum(times)
+        avg_latency = total_inference_time / iterations
+        throughput = (batch_size * iterations) / total_inference_time  # Samples per second
+
+        input_params = f"Model: GPT-2, Batch Size: {batch_size}, Sequence Length: {seq_length}, Iterations: {iterations}"
+
+        result = {
+            'task': 'GPT-2 Inference',
+            'input_params': input_params,
+            'average_latency_seconds': avg_latency,
+            'throughput_samples_per_second': throughput,
+            'execution_time': total_inference_time,
+            'score': (throughput / reference_metrics['gpt_inference_throughput']) * 100
+        }
+
+        # Cleanup
+        del model
+        del inputs
+        torch.cuda.empty_cache()
+
+        return result
+
+    except Exception as e:
+        print(f"Error during GPT-2 inference benchmarking: {e}")
+        return None
+
+def benchmark_tensor_cores(matrix_size, num_iterations, reference_metrics):
+    """
+    Benchmarks Tensor Core performance using mixed-precision matrix multiplication.
+    """
+    try:
+        if not torch.cuda.is_available():
+            print("CUDA is not available. Cannot benchmark Tensor Cores.")
+            return None
+
+        device = torch.device('cuda')
+
+        # Generate random matrices
+        A = torch.randn(matrix_size, matrix_size, device=device, dtype=torch.float16)
+        B = torch.randn(matrix_size, matrix_size, device=device, dtype=torch.float16)
+
+        # Warm-up
+        torch.cuda.synchronize()
+        C = torch.matmul(A, B)
+        torch.cuda.synchronize()
+
+        # Measure time for multiple iterations
+        start_time = time.time()
+        for _ in range(num_iterations):
+            C = torch.matmul(A, B)
+        torch.cuda.synchronize()
+        end_time = time.time()
+
+        total_time = end_time - start_time
+
+        # Calculate GFLOPS
+        total_flops = 2 * matrix_size ** 3 * num_iterations
+        gflops = total_flops / total_time / 1e9
+
+        input_params = f"Matrix Size: {matrix_size}, Iterations: {num_iterations}"
+
+        result = {
+            'task': 'Tensor Core Performance',
+            'input_params': input_params,
+            'gflops': gflops,
+            'execution_time': total_time,
+            'score': (gflops / reference_metrics['tensor_core_gflops']) * 100
+        }
+
+        # Cleanup
+        del A
+        del B
+        del C
+        torch.cuda.empty_cache()
+
+        return result
+
+    except Exception as e:
+        print(f"Error during Tensor Core benchmarking: {e}")
+        return None
+
+def benchmark_gpu_memory_bandwidth(data_size_mb, reference_metrics):
+    """
+    Measures GPU memory bandwidth by performing large memory copy operations on the GPU.
+    """
+    try:
+        if not torch.cuda.is_available():
+            print("CUDA is not available. Cannot benchmark GPU Memory Bandwidth.")
+            return None
+
+        device = torch.device('cuda')
+
+        data_size = data_size_mb * 1024 * 1024  # Convert MB to bytes
+        num_elements = data_size // 4  # Number of float32 elements
+
+        # Generate data on GPU
+        src_tensor = torch.randn(num_elements, device=device, dtype=torch.float32)
+
+        # Warm-up
+        dest_tensor = src_tensor.clone()
+
+        # Measure copy bandwidth
+        torch.cuda.synchronize()
+        start_time = time.time()
+        dest_tensor = src_tensor.clone()
+        torch.cuda.synchronize()
+        end_time = time.time()
+
+        copy_time = end_time - start_time
+        bandwidth_gb_per_sec = (data_size / copy_time) / 1e9
+
+        input_params = f"Data Size: {data_size_mb} MB"
+
+        result = {
+            'task': 'GPU Memory Bandwidth',
+            'input_params': input_params,
+            'bandwidth_gb_per_sec': bandwidth_gb_per_sec,
+            'execution_time': copy_time,
+            'score': (bandwidth_gb_per_sec / reference_metrics['gpu_memory_bandwidth_gb_per_sec']) * 100
+        }
+
+        # Cleanup
+        del src_tensor
+        del dest_tensor
+        torch.cuda.empty_cache()
+
+        return result
+
+    except Exception as e:
+        print(f"Error during GPU memory bandwidth benchmarking: {e}")
+        return None
+
 def start_gpu_logging(log_file, log_metrics):
     metrics = log_metrics.split(',')
     query_fields = ','.join(metrics)
@@ -835,6 +1169,16 @@ def print_results_table(results, total_score, total_execution_time):
             )
         elif task == 'Memory Bandwidth':
             metric = f"Bandwidth: {result['bandwidth_gb_per_sec']:.2f} GB/s"
+        elif task == 'ResNet50 Inference':
+            metric = f"Throughput: {result['throughput_samples_per_second']:.2f} samples/s"
+        elif task == 'BERT Inference':
+            metric = f"Throughput: {result['throughput_samples_per_second']:.2f} samples/s"
+        elif task == 'GPT-2 Inference':
+            metric = f"Throughput: {result['throughput_samples_per_second']:.2f} samples/s"
+        elif task == 'Tensor Core Performance':
+            metric = f"GFLOPS: {result['gflops']:.2f}"
+        elif task == 'GPU Memory Bandwidth':
+            metric = f"Bandwidth: {result['bandwidth_gb_per_sec']:.2f} GB/s"
         else:
             metric = 'N/A'
 
@@ -864,100 +1208,135 @@ def print_results_table(results, total_score, total_execution_time):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='GPU Benchmarking Script with CPU and Memory Bandwidth Tests',
+        description='Comprehensive Benchmarking Script for GPU, CPU, and Memory Performance',
         formatter_class=argparse.RawTextHelpFormatter
     )
-    parser.add_argument('--json', action='store_true',
-                        help='Output results in JSON format')
-    parser.add_argument('--detailed-output', action='store_true',
-                        help='Show detailed benchmark results (default: False)')
-    parser.add_argument('--data-size-gb', type=float, default=5.0,
-                        help='Data size in GB for benchmarks (default: 5.0)\n'
-                             'Used in GPU data generation, GPU to CPU transfer, and CPU to disk write tests.')
-    parser.add_argument('--comp-batch-size', type=int, default=2048,
-                        help='Batch size for computational task (default: 2048)\n'
-                             'Determines the number of samples processed at once during training.')
-    parser.add_argument('--comp-hidden-size', type=int, default=4096,
-                        help='Hidden layer size for computational task (default: 4096)\n'
-                             'Number of neurons in each hidden layer of the neural network.')
-    parser.add_argument('--num-iterations', type=int, default=1,
-                        help='Number of times to run the benchmarks (default: 1)')
-    parser.add_argument('--comp-epochs', type=int, default=200,
-                        help='Number of epochs for computational task (default: 200)\n'
-                             'Defines how many times the entire dataset is passed through the network.')
-    parser.add_argument('--comp-input-size', type=int, default=4096,
-                        help='Input size for computational task (default: 4096)\n'
-                             'Number of features in the input data.')
-    parser.add_argument('--comp-output-size', type=int, default=2000,
-                        help='Output size for computational task (default: 2000)\n'
-                             'Number of output classes or regression targets.')
-    parser.add_argument('--log-gpu', action='store_true',
-                        help='Enable GPU logging during benchmarks (default log file: gpu_log.csv)')
-    parser.add_argument('--gpu-log-file', type=str, default='gpu_log.csv',
-                        help='Specify GPU log file name (default: gpu_log.csv)')
-    parser.add_argument('--gpu-log-metrics', type=str,
-                        default='timestamp,pstate,temperature.gpu,utilization.gpu,clocks.current.graphics,clocks.max.graphics,power.draw,clocks_throttle_reasons.active',
-                        help='Comma-separated list of GPU metrics to log (default metrics are shown below):\n'
-                             'timestamp,pstate,temperature.gpu,utilization.gpu,clocks.current.graphics,\n'
-                             'clocks.max.graphics,power.draw,clocks_throttle_reasons.active')
-    # Arguments for benchmarks
-    parser.add_argument('--inference', action='store_true',
-                        help='Run inference performance benchmark')
-    parser.add_argument('--inf-model-size', type=int, default=5,
-                        help='Depth of the inference model (number of convolutional layers, default: 5)')
-    parser.add_argument('--inf-batch-size', type=int, default=256,
-                        help='Batch size for inference benchmark (default: 256)')
-    parser.add_argument('--inf-input-size', type=int, default=224,
-                        help='Input size (height and width) for inference benchmark (default: 224)')
-    parser.add_argument('--inf-output-size', type=int, default=1000,
-                        help='Output size for inference benchmark (default: 1000)')
-    parser.add_argument('--inf-iterations', type=int, default=100,
-                        help='Number of iterations for inference benchmark (default: 100)')
 
-    parser.add_argument('--disk-io', action='store_true',
-                        help='Run disk I/O performance benchmark')
-    parser.add_argument('--disk-data-size', type=float, default=4.0,
-                        help='Data size in GB for disk I/O benchmark (default: 4.0)')
-    parser.add_argument('--disk-block-size', type=int, default=4,
-                        help='Block size in KB for disk I/O benchmark (default: 4)')
-    parser.add_argument('--disk-io-depth', type=int, default=16,
-                        help='IO depth for disk I/O benchmark (default: 16)')
-    parser.add_argument('--disk-num-jobs', type=int, default=8,
-                        help='Number of concurrent jobs for disk I/O benchmark (default: 8)')
+    # General Arguments
+    general_group = parser.add_argument_group('General Options')
+    general_group.add_argument('--json', action='store_true',
+                               help='Output results in JSON format')
+    general_group.add_argument('--detailed-output', action='store_true',
+                               help='Show detailed benchmark results')
+    general_group.add_argument('--num-iterations', type=int, default=1,
+                               help='Number of times to run the benchmarks (default: 1)')
+    general_group.add_argument('--log-gpu', action='store_true',
+                               help='Enable GPU logging during benchmarks')
+    general_group.add_argument('--gpu-log-file', type=str, default='gpu_log.csv',
+                               help='Specify GPU log file name')
+    general_group.add_argument('--gpu-log-metrics', type=str,
+                               default='timestamp,pstate,temperature.gpu,utilization.gpu,clocks.current.graphics,clocks.max.graphics,power.draw,clocks_throttle_reasons.active',
+                               help='Comma-separated list of GPU metrics to log')
+    general_group.add_argument('--gpus', type=str, default=None,
+                               help='Comma-separated list of GPU IDs to use (e.g., "0,1,2,3")')
 
-    # New flags for other benchmarks
-    parser.add_argument('--gpu-data-gen', action='store_true', help='Run GPU Data Generation benchmark')
-    parser.add_argument('--gpu-to-cpu-transfer', action='store_true', help='Run GPU to CPU Transfer benchmark')
-    parser.add_argument('--cpu-to-disk-write', action='store_true', help='Run CPU to Disk Write benchmark')
-    parser.add_argument('--computational-task', action='store_true', help='Run Computationally Intensive Task benchmark')
+    # Benchmark Selection
+    benchmark_group = parser.add_argument_group('Benchmark Selection')
+    benchmark_group.add_argument('--all', action='store_true', help='Run all benchmarks')
 
-    # New flags for CPU and memory benchmarks
-    parser.add_argument('--cpu-single-thread', action='store_true', help='Run CPU Single-threaded Performance benchmark')
-    parser.add_argument('--cpu-multi-thread', action='store_true', help='Run CPU Multi-threaded Performance benchmark')
-    parser.add_argument('--cpu-num-threads', type=int, default=psutil.cpu_count(logical=True),
-                        help='Number of threads to use for multi-threaded CPU benchmark (default: all logical cores)')
+    # GPU Benchmarks
+    gpu_group = parser.add_argument_group('GPU Benchmarks')
+    gpu_group.add_argument('--gpu-data-gen', action='store_true', help='Run GPU Data Generation benchmark')
+    gpu_group.add_argument('--gpu-to-cpu-transfer', action='store_true', help='Run GPU to CPU Transfer benchmark')
+    gpu_group.add_argument('--gpu-memory-bandwidth', action='store_true', help='Run GPU Memory Bandwidth benchmark')
+    gpu_group.add_argument('--tensor-core', action='store_true', help='Run Tensor Core Performance benchmark')
+    gpu_group.add_argument('--data-size-gb', type=float, default=5.0,
+                           help='Data size in GB for GPU benchmarks (default: 5.0)')
+    gpu_group.add_argument('--memory-size-mb', type=int, default=1024,
+                           help='Memory size in MB for GPU Memory Bandwidth benchmark (default: 1024)')
+    gpu_group.add_argument('--tensor-core-matrix-size', type=int, default=4096,
+                           help='Matrix size for Tensor Core benchmark (default: 4096)')
+    gpu_group.add_argument('--tensor-core-iterations', type=int, default=1000,
+                           help='Iterations for Tensor Core benchmark (default: 1000)')
 
-    parser.add_argument('--memory-bandwidth', action='store_true', help='Run Memory Bandwidth benchmark')
-    parser.add_argument('--memory-size-mb', type=int, default=1024,
-                        help='Memory size in MB for memory bandwidth benchmark (default: 1024)')
+    # Model-Specific Benchmarks
+    model_group = parser.add_argument_group('Model-Specific Benchmarks')
+    model_group.add_argument('--resnet-inference', action='store_true', help='Run ResNet50 Inference benchmark')
+    model_group.add_argument('--bert-inference', action='store_true', help='Run BERT Inference benchmark')
+    model_group.add_argument('--gpt-inference', action='store_true', help='Run GPT-2 Inference benchmark')
+    model_group.add_argument('--resnet-batch-size', type=int, default=64,
+                             help='Batch size for ResNet50 benchmark (default: 64)')
+    model_group.add_argument('--resnet-input-size', type=int, default=224,
+                             help='Input size for ResNet50 benchmark (default: 224)')
+    model_group.add_argument('--resnet-iterations', type=int, default=100,
+                             help='Iterations for ResNet50 benchmark (default: 100)')
+    model_group.add_argument('--bert-batch-size', type=int, default=16,
+                             help='Batch size for BERT benchmark (default: 16)')
+    model_group.add_argument('--bert-seq-length', type=int, default=128,
+                             help='Sequence length for BERT benchmark (default: 128)')
+    model_group.add_argument('--bert-iterations', type=int, default=100,
+                             help='Iterations for BERT benchmark (default: 100)')
+    model_group.add_argument('--gpt-batch-size', type=int, default=8,
+                             help='Batch size for GPT-2 benchmark (default: 8)')
+    model_group.add_argument('--gpt-seq-length', type=int, default=128,
+                             help='Sequence length for GPT-2 benchmark (default: 128)')
+    model_group.add_argument('--gpt-iterations', type=int, default=100,
+                             help='Iterations for GPT-2 benchmark (default: 100)')
 
-    # Argument to specify GPUs
-    parser.add_argument('--gpus', type=str, default=None,
-                        help='Comma-separated list of GPU IDs to use (e.g., "0,1,2,3"). If not set, use all available GPUs.')
+    # CPU Benchmarks
+    cpu_group = parser.add_argument_group('CPU Benchmarks')
+    cpu_group.add_argument('--computational-task', action='store_true', help='Run Computationally Intensive Task benchmark')
+    cpu_group.add_argument('--cpu-single-thread', action='store_true', help='Run CPU Single-threaded Performance benchmark')
+    cpu_group.add_argument('--cpu-multi-thread', action='store_true', help='Run CPU Multi-threaded Performance benchmark')
+    cpu_group.add_argument('--cpu-to-disk-write', action='store_true', help='Run CPU to Disk Write benchmark')
+    cpu_group.add_argument('--memory-bandwidth', action='store_true', help='Run Memory Bandwidth benchmark')
+    cpu_group.add_argument('--cpu-num-threads', type=int, default=psutil.cpu_count(logical=True),
+                           help='Number of threads to use for multi-threaded CPU benchmark (default: all logical cores)')
+    cpu_group.add_argument('--data-size-gb-cpu', type=float, default=5.0,
+                           help='Data size in GB for CPU to Disk Write benchmark (default: 5.0)')
+    cpu_group.add_argument('--memory-size-mb-cpu', type=int, default=1024,
+                           help='Memory size in MB for CPU Memory Bandwidth benchmark (default: 1024)')
+    cpu_group.add_argument('--comp-epochs', type=int, default=200,
+                           help='Number of epochs for computational task (default: 200)')
+    cpu_group.add_argument('--comp-batch-size', type=int, default=2048,
+                           help='Batch size for computational task (default: 2048)')
+    cpu_group.add_argument('--comp-input-size', type=int, default=4096,
+                           help='Input size for computational task (default: 4096)')
+    cpu_group.add_argument('--comp-hidden-size', type=int, default=4096,
+                           help='Hidden layer size for computational task (default: 4096)')
+    cpu_group.add_argument('--comp-output-size', type=int, default=2000,
+                           help='Output size for computational task (default: 2000)')
 
+    # Disk I/O Benchmark
+    disk_group = parser.add_argument_group('Disk I/O Benchmark')
+    disk_group.add_argument('--disk-io', action='store_true', help='Run Disk I/O Performance benchmark')
+    disk_group.add_argument('--disk-data-size', type=float, default=4.0,
+                            help='Data size in GB for disk I/O benchmark (default: 4.0)')
+    disk_group.add_argument('--disk-block-size', type=int, default=4,
+                            help='Block size in KB for disk I/O benchmark (default: 4)')
+    disk_group.add_argument('--disk-io-depth', type=int, default=16,
+                            help='IO depth for disk I/O benchmark (default: 16)')
+    disk_group.add_argument('--disk-num-jobs', type=int, default=8,
+                            help='Number of concurrent jobs for disk I/O benchmark (default: 8)')
+
+    # Inference Benchmark
+    inference_group = parser.add_argument_group('Custom Inference Benchmark')
+    inference_group.add_argument('--inference', action='store_true', help='Run custom inference performance benchmark')
+    inference_group.add_argument('--model-size', type=int, default=5,
+                                 help='Depth of the inference model (default: 5)')
+    inference_group.add_argument('--batch-size', type=int, default=256,
+                                 help='Batch size for inference benchmark (default: 256)')
+    inference_group.add_argument('--input-size', type=int, default=224,
+                                 help='Input size for inference benchmark (default: 224)')
+    inference_group.add_argument('--output-size', type=int, default=1000,
+                                 help='Output size for inference benchmark (default: 1000)')
+    inference_group.add_argument('--iterations', type=int, default=100,
+                                 help='Number of iterations for inference benchmark (default: 100)')
+
+    # Parse arguments
     args = parser.parse_args()
 
-    # Set CUDA_VISIBLE_DEVICES before any CUDA operations
+    # Set CUDA_VISIBLE_DEVICES
     if args.gpus is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
         print(f"Using GPUs: {args.gpus}")
     else:
         print("Using all available GPUs")
 
-    torch.backends.cudnn.benchmark = True  # Enable cuDNN autotuner
+    torch.backends.cudnn.benchmark = True
 
     # Determine which benchmarks to run
-    if not any([
+    if args.all or not any([
         args.inference,
         args.disk_io,
         args.gpu_data_gen,
@@ -966,7 +1345,12 @@ def main():
         args.computational_task,
         args.cpu_single_thread,
         args.cpu_multi_thread,
-        args.memory_bandwidth
+        args.memory_bandwidth,
+        args.resnet_inference,
+        args.bert_inference,
+        args.gpt_inference,
+        args.tensor_core,
+        args.gpu_memory_bandwidth
     ]):
         # No specific benchmarks specified, so run all
         run_inference = True
@@ -978,6 +1362,11 @@ def main():
         run_cpu_single_thread = True
         run_cpu_multi_thread = True
         run_memory_bandwidth = True
+        run_resnet_inference = True
+        run_bert_inference = True
+        run_gpt_inference = True
+        run_tensor_core = True
+        run_gpu_memory_bandwidth = True
     else:
         run_inference = args.inference
         run_disk_io = args.disk_io
@@ -988,6 +1377,11 @@ def main():
         run_cpu_single_thread = args.cpu_single_thread
         run_cpu_multi_thread = args.cpu_multi_thread
         run_memory_bandwidth = args.memory_bandwidth
+        run_resnet_inference = args.resnet_inference
+        run_bert_inference = args.bert_inference
+        run_gpt_inference = args.gpt_inference
+        run_tensor_core = args.tensor_core
+        run_gpu_memory_bandwidth = args.gpu_memory_bandwidth
 
     # Start total execution timer
     total_start_time = time.time()
@@ -1008,25 +1402,32 @@ def main():
         else:
             print("Failed to start GPU logging.")
 
-    # Define reference metrics for scoring
+    # Updated Reference Metrics
     reference_metrics = {
-        'gpu_data_generation_bandwidth': 110.0,    # GB/s
-        'gpu_to_cpu_transfer_bandwidth': 0.5,      # GB/s
-        'cpu_to_disk_write_bandwidth': 0.2,        # GB/s
-        'computational_task_gflops': 7000.0,       # GFLOPS
-        'inference_throughput': 13000.0,           # Samples per second
-        'sequential_read_throughput_mb_per_sec': 110.0,    # MB/s
-        'random_read_iops': 24000.0,               # IOPS
-        'cpu_single_thread_comp_perf': 1.0,        # Fibonacci numbers per second (example value)
-        'cpu_single_thread_crypto_perf': 50.0,     # MB/s (example value)
-        'cpu_single_thread_data_proc_perf': 50.0,  # MB/s (example value)
-        'cpu_multi_thread_comp_perf': 10.0,        # Fibonacci numbers per second (example value)
-        'cpu_multi_thread_crypto_perf': 500.0,     # MB/s (example value)
-        'cpu_multi_thread_data_proc_perf': 500.0,  # MB/s (example value)
-        'memory_bandwidth_gb_per_sec': 10.0,       # GB/s (example value)
+        'gpu_data_generation_bandwidth': 50.0,    # GB/s
+        'gpu_to_cpu_transfer_bandwidth': 0.25,    # GB/s
+        'cpu_to_disk_write_bandwidth': 0.25,      # GB/s
+        'computational_task_gflops': 1000.0,      # GFLOPS
+        'inference_throughput': 1000.0,           # Samples per second
+        'sequential_read_throughput_mb_per_sec': 100.0,    # MB/s
+        'sequential_write_throughput_mb_per_sec': 90.0,    # MB/s
+        'random_read_iops': 5000.0,               # IOPS
+        'random_write_iops': 4500.0,              # IOPS
+        'cpu_single_thread_comp_perf': 5.0,       # Fibonacci numbers per second
+        'cpu_single_thread_crypto_perf': 100.0,   # MB/s
+        'cpu_single_thread_data_proc_perf': 100.0,# MB/s
+        'cpu_multi_thread_comp_perf': 5.0,        # Fibonacci numbers per second
+        'cpu_multi_thread_crypto_perf': 400.0,    # MB/s
+        'cpu_multi_thread_data_proc_perf': 400.0, # MB/s
+        'memory_bandwidth_gb_per_sec': 2.0,       # GB/s
+        'resnet_inference_throughput': 500.0,     # Samples per second
+        'bert_inference_throughput': 100.0,       # Samples per second
+        'gpt_inference_throughput': 100.0,        # Samples per second
+        'tensor_core_gflops': 5000.0,             # GFLOPS
+        'gpu_memory_bandwidth_gb_per_sec': 500.0, # GB/s
     }
 
-    # Run benchmarks for N iterations
+    # Run benchmarks
     all_results = []
     for iteration in range(args.num_iterations):
         print(f"\n=== Iteration {iteration + 1}/{args.num_iterations} ===")
@@ -1034,26 +1435,22 @@ def main():
 
         if run_gpu_data_gen:
             print("Running GPU Data Generation benchmark...")
-            # Benchmark GPU Data Generation
             result = benchmark_gpu_data_generation(args.data_size_gb, reference_metrics)
             results.append(result)
 
         if run_gpu_to_cpu_transfer:
             print("Running GPU to CPU Transfer benchmark...")
-            # Benchmark GPU to CPU Transfer
             result = benchmark_gpu_to_cpu_transfer(args.data_size_gb, reference_metrics)
             results.append(result)
 
         if run_cpu_to_disk_write:
             print("Running CPU to Disk Write benchmark...")
-            # Benchmark CPU to Disk Write
             output_file = f'benchmark_output_{iteration}.bin'
-            result = benchmark_cpu_to_disk_write(output_file, args.data_size_gb, reference_metrics)
+            result = benchmark_cpu_to_disk_write(output_file, args.data_size_gb_cpu, reference_metrics)
             results.append(result)
 
         if run_computational_task:
             print("Running Computationally Intensive Task benchmark...")
-            # Benchmark Computationally Intensive Task
             computational_result = benchmark_computational_task(
                 epochs=args.comp_epochs,
                 batch_size=args.comp_batch_size,
@@ -1064,20 +1461,18 @@ def main():
             )
             results.append(computational_result)
 
-        # Run inference performance benchmark if enabled
         if run_inference:
             print("Running Inference Performance benchmark...")
             inference_result = benchmark_inference_performance(
-                model_size=args.inf_model_size,
-                batch_size=args.inf_batch_size,
-                input_size=args.inf_input_size,
-                output_size=args.inf_output_size,
-                iterations=args.inf_iterations,
+                model_size=args.model_size,
+                batch_size=args.batch_size,
+                input_size=args.input_size,
+                output_size=args.output_size,
+                iterations=args.iterations,
                 reference_metrics=reference_metrics
             )
             results.append(inference_result)
 
-        # Run disk I/O performance benchmark if enabled
         if run_disk_io:
             print("Running Disk I/O Performance benchmark...")
             disk_file_path = f'disk_io_test_file_{iteration}.dat'
@@ -1103,8 +1498,55 @@ def main():
 
         if run_memory_bandwidth:
             print("Running Memory Bandwidth benchmark...")
-            memory_bandwidth_result = benchmark_memory_bandwidth(args.memory_size_mb, reference_metrics)
+            memory_bandwidth_result = benchmark_memory_bandwidth(args.memory_size_mb_cpu, reference_metrics)
             results.append(memory_bandwidth_result)
+
+        if run_resnet_inference:
+            print("Running ResNet50 Inference benchmark...")
+            resnet_result = benchmark_resnet_inference(
+                batch_size=args.resnet_batch_size,
+                input_size=args.resnet_input_size,
+                iterations=args.resnet_iterations,
+                reference_metrics=reference_metrics
+            )
+            results.append(resnet_result)
+
+        if run_bert_inference:
+            print("Running BERT Inference benchmark...")
+            bert_result = benchmark_bert_inference(
+                batch_size=args.bert_batch_size,
+                seq_length=args.bert_seq_length,
+                iterations=args.bert_iterations,
+                reference_metrics=reference_metrics
+            )
+            results.append(bert_result)
+
+        if run_gpt_inference:
+            print("Running GPT-2 Inference benchmark...")
+            gpt_result = benchmark_gpt_inference(
+                batch_size=args.gpt_batch_size,
+                seq_length=args.gpt_seq_length,
+                iterations=args.gpt_iterations,
+                reference_metrics=reference_metrics
+            )
+            results.append(gpt_result)
+
+        if run_tensor_core:
+            print("Running Tensor Core Performance benchmark...")
+            tensor_core_result = benchmark_tensor_cores(
+                matrix_size=args.tensor_core_matrix_size,
+                num_iterations=args.tensor_core_iterations,
+                reference_metrics=reference_metrics
+            )
+            results.append(tensor_core_result)
+
+        if run_gpu_memory_bandwidth:
+            print("Running GPU Memory Bandwidth benchmark...")
+            gpu_mem_bw_result = benchmark_gpu_memory_bandwidth(
+                data_size_mb=args.memory_size_mb,
+                reference_metrics=reference_metrics
+            )
+            results.append(gpu_mem_bw_result)
 
         all_results.extend(results)
 
