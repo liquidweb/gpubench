@@ -153,8 +153,3 @@ Licensed under the GNU GPL v3.
 Copyright (C) 2023 Liquid Web, LLC <deveng@liquidweb.com>
 Ryan MacDonald <rmacdonald@liquidweb.com>
 ```
-
-## Contact
-For any questions or feedback:
-- Liquid Web Dev Team: <deveng@liquidweb.com>
-- Ryan MacDonald: <rmacdonald@liquidweb.com>
