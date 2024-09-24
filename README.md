@@ -140,6 +140,7 @@ python3 gpubench.py --cpu-multi-thread --cpu-num-threads 8
 ```
 #### Example Output:
 12 vCPUs, 128G RAM, 700 GB NVMe, 2x A16
+executed with `python3 gpubench.py` (no options)
 ```
 Benchmark Results:
 +---------------------------------+--------------------------------+----------------------------------------------------+-----------------+---------+
