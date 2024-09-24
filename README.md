@@ -139,8 +139,8 @@ python3 gpubench.py --gpu-memory-bandwidth --memory-size-mb 1024
 python3 gpubench.py --cpu-multi-thread --cpu-num-threads 8
 ```
 #### Example Output:
-system: 12 vCPUs, 128G RAM, 700 GB NVMe, 2x A16
-executed: `python3 gpubench.py` (no options)
+- system: 12 vCPUs, 128G RAM, 700 GB NVMe, 2x A16
+- executed: `python3 gpubench.py` (no options)
 
 ```
 Benchmark Results:
