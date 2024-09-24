@@ -392,15 +392,20 @@ def run_gpu_to_gpu_transfer(gpu0_id, gpu1_id, num_elements, iterations, return_d
     torch.cuda.empty_cache()
 
 # GPU Benchmark Functions
-def benchmark_gpu_data_generation(data_size_gb, reference_metrics):
+def benchmark_gpu_data_generation(data_size_gb, reference_metrics, gpu_ids=None):
     """
     Generates large tensors of random numbers directly on the GPUs to benchmark GPU memory bandwidth.
     """
     try:
-        if torch.cuda.is_available():
-            num_gpus = torch.cuda.device_count()
+        if gpu_ids is None:
+            if torch.cuda.is_available():
+                num_gpus = torch.cuda.device_count()
+                gpu_ids = list(range(num_gpus))
+            else:
+                num_gpus = 0
+                gpu_ids = []
         else:
-            num_gpus = 0
+            num_gpus = len(gpu_ids)
 
         if num_gpus == 0:
             print("No GPUs available for GPU Data Generation benchmark.")
@@ -418,28 +423,42 @@ def benchmark_gpu_data_generation(data_size_gb, reference_metrics):
         return_dict = manager.dict()
         processes = []
 
-        for i in range(num_gpus):
-            p = mp.Process(target=run_data_generation_on_gpu, args=(i, num_elements_per_gpu, return_dict))
+        for gpu_id in gpu_ids:
+            p = mp.Process(target=run_data_generation_on_gpu, args=(gpu_id, num_elements_per_gpu, return_dict))
             p.start()
             processes.append(p)
 
         for p in processes:
             p.join()
 
+        # Collect per-GPU times
         gen_times = return_dict.values()
-        max_gen_time = max(gen_times)
-        data_size_bytes = num_elements_per_gpu * 4 * num_gpus  # float32
-        data_size_gb_actual = data_size_bytes / 1e9
-        gen_bandwidth = data_size_gb_actual / max_gen_time if max_gen_time > 0 else float('inf')
+        # Calculate per-GPU bandwidths
+        per_gpu_bandwidths = []
+        data_size_bytes_per_gpu = num_elements_per_gpu * 4  # float32
+        data_size_gb_per_gpu = data_size_bytes_per_gpu / 1e9
+        for gen_time in gen_times:
+            bw = data_size_gb_per_gpu / gen_time if gen_time > 0 else 0
+            per_gpu_bandwidths.append(bw)
+
+        # Total bandwidth is sum of per-GPU bandwidths
+        total_bandwidth = sum(per_gpu_bandwidths)
+
+        # Total execution time is the maximum of the per-GPU times (since processes run in parallel)
+        total_time = max(gen_times)
+
+        # Total data size generated
+        data_size_bytes_total = data_size_bytes_per_gpu * num_gpus
+        data_size_gb_actual = data_size_bytes_total / 1e9
 
         result = {
             'task': 'GPU Data Generation',
             'input_params': f'Data Size: {data_size_gb} GB',
             'data_size_gb': data_size_gb_actual,
-            'time_seconds': max_gen_time,
-            'bandwidth_gb_per_second': gen_bandwidth,
-            'execution_time': max_gen_time,
-            'score': (gen_bandwidth / reference_metrics['gpu_data_generation_bandwidth']) * 100
+            'time_seconds': total_time,
+            'bandwidth_gb_per_second': total_bandwidth,
+            'execution_time': total_time,
+            'score': (total_bandwidth / reference_metrics['gpu_data_generation_bandwidth']) * 100
         }
 
         return result
