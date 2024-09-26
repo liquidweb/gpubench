@@ -286,8 +286,8 @@ def parse_arguments():
     # Disk I/O Benchmark
     disk_group = parser.add_argument_group('Disk I/O Benchmark')
     disk_group.add_argument('--disk-io', action='store_true', help='Run Disk I/O Performance benchmark')
-    disk_group.add_argument('--disk-data-size', type=float, default=4.0,
-                            help='Data size in GB for disk I/O benchmark (default: 4.0)')
+    disk_group.add_argument('--disk-data-size', type=float, default=2.0,
+                            help='Data size in GB for disk I/O benchmark (default: 2.0)')
     disk_group.add_argument('--disk-block-size', type=int, default=4,
                             help='Block size in KB for disk I/O benchmark (default: 4)')
     disk_group.add_argument('--disk-io-depth', type=int, default=16,
@@ -444,6 +444,8 @@ def benchmark_cpu_single_thread(reference_metrics):
         print(f"Error during single-threaded CPU benchmarking: {e}")
         return None
 
+from concurrent.futures import ThreadPoolExecutor
+
 def benchmark_cpu_multi_thread(reference_metrics, num_threads):
     """
     Performs multi-threaded CPU benchmarks covering computational, cryptographic, and data processing tasks.
@@ -453,28 +455,27 @@ def benchmark_cpu_multi_thread(reference_metrics, num_threads):
 
         n = 500000  # Adjusted for desired computation time
 
-        from multiprocessing import Pool
-
-        # Computational Task
-        with Pool(processes=num_threads) as pool:
+        # Use ThreadPoolExecutor for more efficient thread management
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            # Computational Task
             start_time = time.time()
-            fib_results = pool.map(fibonacci, [n] * num_threads)
+            fib_results = list(executor.map(fibonacci, [n] * num_threads))
             comp_time = time.time() - start_time
         total_time += comp_time
 
         # Cryptographic Task: SHA-256 Hashing
         data_size_mb = 100
         data_blocks = [os.urandom(data_size_mb * 1024 * 1024) for _ in range(num_threads)]
-        with Pool(processes=num_threads) as pool:
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
             start_time = time.time()
-            hash_results = pool.map(hash_data, data_blocks)
+            hash_results = list(executor.map(hash_data, data_blocks))
             crypto_time = time.time() - start_time
         total_time += crypto_time
 
         # Data Processing Task: Gzip Compression/Decompression
-        with Pool(processes=num_threads) as pool:
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
             start_time = time.time()
-            decompressed_results = pool.map(compress_decompress, data_blocks)
+            decompressed_results = list(executor.map(compress_decompress, data_blocks))
             data_proc_time = time.time() - start_time
         total_time += data_proc_time
 
@@ -506,10 +507,6 @@ def benchmark_cpu_multi_thread(reference_metrics, num_threads):
                       (crypto_perf / reference_metrics['cpu_multi_thread_crypto_perf']) +
                       (data_proc_perf / reference_metrics['cpu_multi_thread_data_proc_perf'])) * 100 / 3
         }
-
-        # Cleanup
-        del data_blocks
-        del decompressed_results
 
         return result
 
@@ -620,7 +617,7 @@ def benchmark_disk_io(file_path, data_size_gb, block_size_kb, io_depth, num_jobs
                 f'--iodepth={test["iodepth"]}',
                 f'--numjobs={test["numjobs"]}',
                 '--direct=1',
-                '--runtime=15',
+                '--runtime=30',
                 '--time_based',
                 '--group_reporting',
                 f'--output={test["name"]}_output.json',
