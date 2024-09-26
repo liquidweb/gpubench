@@ -20,16 +20,10 @@ With comparative scoring, users can benchmark similar systems to ensure consiste
 ## Requirements and Setup
 
 ### System Requirements
-- **Operating System**: Linux (tested on Ubuntu 22.04/24.04 and Rocky/Alma Linux 9)
-- **Python 3.x**: The script requires Python 3.6 or newer.
-- **CUDA**: Ensure CUDA is properly installed to take full advantage of GPU benchmarks.
+- **Operating System**: Ubuntu 22.04/24.04 or Rocky/Alma Linux 9
 - **Disk space**: At least 10GB of free disk space for benchmarking operations.
-
-### System Binaries and Libraries
-The following system binaries and libraries are required:
 - **fio**: Flexible I/O Tester, used for disk I/O benchmarks.
 - **nvidia-smi**: NVIDIA System Management Interface, used for GPU monitoring (typically installed with CUDA).
-- **libaio**: Linux native asynchronous I/O library, used by fio for disk benchmarks.
 - **CUDA libraries**: Required for GPU operations (installed with CUDA toolkit).
 
 ### Python Dependencies
