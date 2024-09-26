@@ -455,11 +455,11 @@ def benchmark_cpu_multi_thread(reference_metrics, num_threads):
 
         n = 500000  # Adjusted for desired computation time
 
-        # Use ThreadPoolExecutor for more efficient thread management
-        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        # Use multiprocessing Pool for CPU-bound tasks
+        with mp.Pool(processes=num_threads) as pool:
             # Computational Task
             start_time = time.time()
-            fib_results = list(executor.map(fibonacci, [n] * num_threads))
+            fib_results = pool.map(fibonacci, [n] * num_threads)
             comp_time = time.time() - start_time
         total_time += comp_time
 
