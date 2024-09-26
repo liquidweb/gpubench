@@ -969,9 +969,19 @@ def benchmark_gpu_to_gpu_transfer(data_size_gb, reference_metrics, precision, ph
         else:
             physical_gpu_ids = validate_gpu_ids(physical_gpu_ids)
 
+        # Ensure at least two GPUs are available
         if len(physical_gpu_ids) < 2:
             print("At least two GPUs are required for GPU to GPU Transfer benchmark.")
-            return None
+            return {
+                'task': 'GPU to GPU Transfer',
+                'category': 'GPU',
+                'input_params': f"Data Size: {data_size_gb} GB, Precision: {precision}",
+                'metrics': "Not Applicable",
+                'bandwidth_gb_per_second': 0.0,
+                'execution_time': 0.0,
+                'score': 0,  # Return a score of 0 if the test cannot be run
+                'error': 'Less than two GPUs detected.'
+            }
 
         # Map physical GPU IDs to logical IDs
         physical_to_logical = map_physical_to_logical_gpu_ids(physical_gpu_ids)
@@ -996,7 +1006,15 @@ def benchmark_gpu_to_gpu_transfer(data_size_gb, reference_metrics, precision, ph
         average_copy_time = return_dict.get('copy_time', None)
         if average_copy_time is None:
             print("Failed to collect copy time.")
-            return None
+            return {
+                'task': 'GPU to GPU Transfer',
+                'category': 'GPU',
+                'input_params': f"Data Size: {data_size_gb} GB, Precision: {precision}",
+                'metrics': "Error collecting copy time",
+                'bandwidth_gb_per_second': 0.0,
+                'execution_time': 0.0,
+                'score': 0
+            }
 
         data_size_bytes = num_elements * element_size
         data_size_gb_actual = data_size_bytes / 1e9
@@ -1019,7 +1037,16 @@ def benchmark_gpu_to_gpu_transfer(data_size_gb, reference_metrics, precision, ph
 
     except Exception as e:
         print(f"Error during GPU to GPU transfer benchmarking: {e}")
-        return None
+        return {
+            'task': 'GPU to GPU Transfer',
+            'category': 'GPU',
+            'input_params': f"Data Size: {data_size_gb} GB, Precision: {precision}",
+            'metrics': f"Error: {str(e)}",
+            'bandwidth_gb_per_second': 0.0,
+            'execution_time': 0.0,
+            'score': 0
+        }
+
 
 def benchmark_gpu_memory_bandwidth(data_size_mb, reference_metrics, precision):
     """
