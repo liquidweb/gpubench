@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# GPUBench - A Performance Benchmarking Tool for AI/ML Workloads
+# GPUBench - A Performance Benchmarking Tool for AI/ML Servers
 #
-# Copyright (C) 2023 Liquid Web, LLC <deveng@liquidweb.com>
-# Ryan MacDonald <rmacdonald@liquidweb.com>
+# Copyright (C) 2024 Liquid Web, LLC <deveng@liquidweb.com>
+# Copyright (C) 2024 Ryan MacDonald <rmacdonald@liquidweb.com>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -39,6 +39,24 @@ import torch.optim as optim
 from tabulate import tabulate
 import multiprocessing as mp
 
+# Set default tensor type based on precision
+def set_default_tensor_type(precision):
+    if precision == 'fp16':
+        torch.set_default_dtype(torch.float16)
+    elif precision == 'fp32':
+        torch.set_default_dtype(torch.float32)
+    elif precision == 'fp64':
+        torch.set_default_dtype(torch.float64)
+    elif precision == 'bf16':
+        if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+            torch.set_default_dtype(torch.bfloat16)
+        else:
+            print("bfloat16 is not supported on this device. Falling back to float32.")
+            torch.set_default_dtype(torch.float32)
+    else:
+        print(f"Unknown precision: {precision}. Using float32.")
+        torch.set_default_dtype(torch.float32)
+
 # Utility Functions
 def get_system_info():
     # CPU Information
@@ -65,6 +83,7 @@ def get_system_info():
     gpu_info_list = []
     for gpu in gpus:
         gpu_info = {
+            'id': gpu.id,
             'name': gpu.name,
             'total_memory_gb': round(gpu.memoryTotal / 1024, 2),
             'driver_version': gpu.driver,
@@ -111,85 +130,53 @@ def stop_gpu_logging(log_process):
         print(f"Error stopping GPU logging: {e}")
 
 def print_detailed_results(results):
+    print("\n=== Detailed Benchmark Results ===")
     for result in results:
         if result is None:
             continue
         task = result.get('task', 'Unknown Task')
-        print(f"\n=== {task} ===")
+        print(f"\n--- {task} ---")
         for key, value in result.items():
-            if key != 'task':
+            if key not in ['task', 'category']:
                 print(f"{key.replace('_', ' ').capitalize()}: {value}")
 
 def print_results_table(results, total_score, total_execution_time):
-    # Adjusted function to condense table output within 120 characters
+    # Prepare table data
     table_data = []
     max_width_input = 30  # Maximum width for "Input" column
     max_width_metrics = 50  # Maximum width for "Metrics" column
 
-    for result in results:
-        if result is None:
-            continue
-        task = result.get('task', 'Unknown Task')
-        input_params = result.get('input_params', '')
-        score = result.get('score', 'N/A')
-        execution_time = result.get('execution_time', 'N/A')
+    # Separate GPU and System benchmarks
+    gpu_results = [res for res in results if res.get('category') == 'GPU']
+    system_results = [res for res in results if res.get('category') == 'System']
 
-        # Build metric string with relevant metrics
-        if task == 'GPU Data Generation':
-            metric = f"Bandwidth: {result['bandwidth_gb_per_second']:.2f} GB/s"
-        elif task == 'GPU to CPU Transfer':
-            metric = f"Bandwidth: {result['bandwidth_gb_per_second']:.2f} GB/s"
-        elif task == 'GPU to GPU Transfer':
-            metric = f"Bandwidth: {result['bandwidth_gb_per_second']:.2f} GB/s"
-        elif task == 'CPU to Disk Write':
-            metric = f"Bandwidth: {result['bandwidth_gb_per_second']:.2f} GB/s"
-        elif task == 'Computationally Intensive Task':
-            metric = f"GFLOPS: {result['performance_gflops']:.2f}"
-        elif task == 'Inference Performance':
-            metric = f"Throughput: {result['throughput_samples_per_second']:.2f} samples/s"
-        elif task == 'Disk I/O Performance':
-            metric = (
-                f"Seq Read: {result.get('sequential_read_throughput_mb_per_sec', 0):.2f} MB/s, "
-                f"Seq Write: {result.get('sequential_write_throughput_mb_per_sec', 0):.2f} MB/s, "
-                f"Rand Read IOPS: {int(result.get('random_read_iops', 0))}, "
-                f"Rand Write IOPS: {int(result.get('random_write_iops', 0))}"
-            )
-        elif task == 'CPU Single-threaded Performance':
-            metric = (
-                f"Comp Perf: {result['comp_perf']:.2f} fib/sec, "
-                f"Crypto Perf: {result['crypto_perf_mb_per_sec']:.2f} MB/s, "
-                f"Data Proc Perf: {result['data_proc_perf_mb_per_sec']:.2f} MB/s"
-            )
-        elif task == 'CPU Multi-threaded Performance':
-            metric = (
-                f"Comp Perf: {result['comp_perf']:.2f} fib/sec, "
-                f"Crypto Perf: {result['crypto_perf_mb_per_sec']:.2f} MB/s, "
-                f"Data Proc Perf: {result['data_proc_perf_mb_per_sec']:.2f} MB/s"
-            )
-        elif task == 'Memory Bandwidth':
-            metric = f"Bandwidth: {result['bandwidth_gb_per_sec']:.2f} GB/s"
-        elif task == 'ResNet50 Inference':
-            metric = f"Throughput: {result['throughput_samples_per_second']:.2f} samples/s"
-        elif task == 'BERT Inference':
-            metric = f"Throughput: {result['throughput_samples_per_second']:.2f} samples/s"
-        elif task == 'GPT-2 Inference':
-            metric = f"Throughput: {result['throughput_samples_per_second']:.2f} samples/s"
-        elif task == 'Tensor Core Performance':
-            metric = f"GFLOPS: {result['gflops']:.2f}"
-        elif task == 'GPU Memory Bandwidth':
-            metric = f"Bandwidth: {result['bandwidth_gb_per_second']:.2f} GB/s"
-        else:
-            metric = 'N/A'
+    # Function to process results and append to table data
+    def process_results(result_list, header):
+        table_data.append([header, '', '', '', ''])
+        for result in result_list:
+            if result is None:
+                continue
+            task = result.get('task', 'Unknown Task')
+            input_params = result.get('input_params', '')
+            score = result.get('score', 'N/A')
+            execution_time = result.get('execution_time', 'N/A')
 
-        # Wrap text in "Input" and "Metrics" columns
-        wrapped_input = '\n'.join(textwrap.wrap(input_params, width=max_width_input))
-        wrapped_metric = '\n'.join(textwrap.wrap(metric, width=max_width_metrics))
+            # Build metric string with relevant metrics
+            metrics = result.get('metrics', 'N/A')
 
-        # Format execution time and score
-        execution_time_str = f"{float(execution_time):.2f}" if isinstance(execution_time, (int, float)) else 'N/A'
-        score_str = f"{float(score):.1f}" if isinstance(score, (int, float)) else 'N/A'
+            # Wrap text in "Input" and "Metrics" columns
+            wrapped_input = '\n'.join(textwrap.wrap(input_params, width=max_width_input))
+            wrapped_metric = '\n'.join(textwrap.wrap(metrics, width=max_width_metrics))
 
-        table_data.append([task, wrapped_input, wrapped_metric, execution_time_str, score_str])
+            # Format execution time and score
+            execution_time_str = f"{float(execution_time):.2f}" if isinstance(execution_time, (int, float)) else 'N/A'
+            score_str = f"{float(score):.1f}" if isinstance(score, (int, float)) else 'N/A'
+
+            table_data.append([task, wrapped_input, wrapped_metric, execution_time_str, score_str])
+
+    # Process GPU and System results
+    process_results(gpu_results, '=== GPU Benchmarks ===')
+    process_results(system_results, '=== System Benchmarks ===')
 
     # Add total score and total execution time
     total_execution_time_str = f"{float(total_execution_time):.2f}"
@@ -230,6 +217,10 @@ def parse_arguments():
     general_group.add_argument('--gpus', type=str, default=None,
                                help='Comma-separated list of GPU IDs to use (e.g., "0,1,2,3")')
 
+    general_group.add_argument('--precision', type=str, default='fp16',
+                               choices=['fp16', 'fp32', 'fp64', 'bf16'],
+                               help='Precision to use for computations (default: fp16)')
+
     # Benchmark Selection
     benchmark_group = parser.add_argument_group('Benchmark Selection')
     benchmark_group.add_argument('--all', action='store_true', help='Run all benchmarks')
@@ -240,16 +231,16 @@ def parse_arguments():
     gpu_group.add_argument('--gpu-to-cpu-transfer', action='store_true', help='Run GPU to CPU Transfer benchmark')
     gpu_group.add_argument('--gpu-to-gpu-transfer', action='store_true', help='Run GPU to GPU Transfer benchmark')
     gpu_group.add_argument('--gpu-memory-bandwidth', action='store_true', help='Run GPU Memory Bandwidth benchmark')
-    gpu_group.add_argument('--tensor-core', action='store_true', help='Run Tensor Core Performance benchmark')
-    gpu_group.add_argument('--gpu-compute', action='store_true', help='Run GPU Computationally Intensive Task benchmark')
+    gpu_group.add_argument('--gpu-tensor', action='store_true', help='Run GPU Tensor Core Performance benchmark')
+    gpu_group.add_argument('--gpu-compute', action='store_true', help='Run GPU Computational Task benchmark')
     gpu_group.add_argument('--gpu-data-size-gb', type=float, default=5.0,
                            help='Data size in GB for GPU benchmarks (default: 5.0)')
     gpu_group.add_argument('--gpu-memory-size-mb', type=int, default=1024,
                            help='Memory size in MB for GPU Memory Bandwidth benchmark (default: 1024)')
-    gpu_group.add_argument('--tensor-core-matrix-size', type=int, default=4096,
-                           help='Matrix size for Tensor Core benchmark (default: 4096)')
-    gpu_group.add_argument('--tensor-core-iterations', type=int, default=1000,
-                           help='Iterations for Tensor Core benchmark (default: 1000)')
+    gpu_group.add_argument('--gpu-tensor-matrix-size', type=int, default=4096,
+                           help='Matrix size for GPU Tensor Core benchmark (default: 4096)')
+    gpu_group.add_argument('--gpu-tensor-iterations', type=int, default=1000,
+                           help='Iterations for GPU Tensor Core benchmark (default: 1000)')
     gpu_group.add_argument('--gpu-comp-epochs', type=int, default=200,
                            help='Number of epochs for GPU computational task (default: 200)')
     gpu_group.add_argument('--gpu-comp-batch-size', type=int, default=2048,
@@ -261,29 +252,23 @@ def parse_arguments():
     gpu_group.add_argument('--gpu-comp-output-size', type=int, default=2000,
                            help='Output size for GPU computational task (default: 2000)')
 
-    # Model-Specific Benchmarks
-    model_group = parser.add_argument_group('Model-Specific Benchmarks')
-    model_group.add_argument('--resnet-inference', action='store_true', help='Run ResNet50 Inference benchmark')
-    model_group.add_argument('--bert-inference', action='store_true', help='Run BERT Inference benchmark')
-    model_group.add_argument('--gpt-inference', action='store_true', help='Run GPT-2 Inference benchmark')
-    model_group.add_argument('--resnet-batch-size', type=int, default=64,
-                             help='Batch size for ResNet50 benchmark (default: 64)')
-    model_group.add_argument('--resnet-input-size', type=int, default=224,
-                             help='Input size for ResNet50 benchmark (default: 224)')
-    model_group.add_argument('--resnet-iterations', type=int, default=100,
-                             help='Iterations for ResNet50 benchmark (default: 100)')
-    model_group.add_argument('--bert-batch-size', type=int, default=16,
-                             help='Batch size for BERT benchmark (default: 16)')
-    model_group.add_argument('--bert-seq-length', type=int, default=128,
-                             help='Sequence length for BERT benchmark (default: 128)')
-    model_group.add_argument('--bert-iterations', type=int, default=100,
-                             help='Iterations for BERT benchmark (default: 100)')
-    model_group.add_argument('--gpt-batch-size', type=int, default=8,
-                             help='Batch size for GPT-2 benchmark (default: 8)')
-    model_group.add_argument('--gpt-seq-length', type=int, default=128,
-                             help='Sequence length for GPT-2 benchmark (default: 128)')
-    model_group.add_argument('--gpt-iterations', type=int, default=100,
-                             help='Iterations for GPT-2 benchmark (default: 100)')
+    # Custom Inference Benchmark
+    inference_group = parser.add_argument_group('GPU Inference Benchmark')
+    inference_group.add_argument('--gpu-inference', action='store_true', help='Run GPU Inference Performance benchmark')
+    inference_group.add_argument('--gpu-inference-model', type=str, default='custom',
+                                 help=textwrap.dedent('''\
+                                     Model to use for inference benchmark (default: custom).
+                                     Options: custom, resnet50, bert, gpt2'''))
+    inference_group.add_argument('--model-size', type=int, default=5,
+                                 help='Depth of the custom inference model (default: 5)')
+    inference_group.add_argument('--batch-size', type=int, default=256,
+                                 help='Batch size for inference benchmark (default: 256)')
+    inference_group.add_argument('--input-size', type=int, default=224,
+                                 help='Input size for inference benchmark (default: 224)')
+    inference_group.add_argument('--output-size', type=int, default=1000,
+                                 help='Output size for inference benchmark (default: 1000)')
+    inference_group.add_argument('--iterations', type=int, default=100,
+                                 help='Number of iterations for inference benchmark (default: 100)')
 
     # CPU Benchmarks
     cpu_group = parser.add_argument_group('CPU Benchmarks')
@@ -310,23 +295,8 @@ def parse_arguments():
     disk_group.add_argument('--disk-num-jobs', type=int, default=8,
                             help='Number of concurrent jobs for disk I/O benchmark (default: 8)')
 
-    # Inference Benchmark
-    inference_group = parser.add_argument_group('Custom Inference Benchmark')
-    inference_group.add_argument('--inference', action='store_true', help='Run custom inference performance benchmark')
-    inference_group.add_argument('--model-size', type=int, default=5,
-                                 help='Depth of the inference model (default: 5)')
-    inference_group.add_argument('--batch-size', type=int, default=256,
-                                 help='Batch size for inference benchmark (default: 256)')
-    inference_group.add_argument('--input-size', type=int, default=224,
-                                 help='Input size for inference benchmark (default: 224)')
-    inference_group.add_argument('--output-size', type=int, default=1000,
-                                 help='Output size for inference benchmark (default: 1000)')
-    inference_group.add_argument('--iterations', type=int, default=100,
-                                 help='Number of iterations for inference benchmark (default: 100)')
-
     return parser.parse_args()
 
-# Functions moved to top-level for multiprocessing
 def fibonacci(n):
     a, b = 0, 1
     for _ in range(n):
@@ -341,658 +311,29 @@ def compress_decompress(data_block):
     decompressed = gzip.decompress(compressed)
     return decompressed
 
-def run_data_generation_on_gpu(gpu_id, num_elements_per_gpu, return_dict):
-    torch.cuda.set_device(gpu_id)
-    start_time = time.time()
-    tensor = torch.randn(num_elements_per_gpu, device=f'cuda:{gpu_id}', dtype=torch.float32)
-    torch.cuda.synchronize()
-    end_time = time.time()
-    gen_time = end_time - start_time
-    return_dict[gpu_id] = gen_time
-    del tensor
-    torch.cuda.empty_cache()
-
-def run_gpu_to_cpu_transfer_on_gpu(gpu_id, num_elements_per_gpu, return_dict):
-    torch.cuda.set_device(gpu_id)
-    data = torch.randn(num_elements_per_gpu, device=f'cuda:{gpu_id}', dtype=torch.float32)
-    torch.cuda.synchronize()
-    start_time = time.time()
-    cpu_data = data.cpu()
-    torch.cuda.synchronize()
-    end_time = time.time()
-    transfer_time = end_time - start_time
-    return_dict[gpu_id] = transfer_time
-    del data
-    del cpu_data
-    torch.cuda.empty_cache()
-
-def run_gpu_to_gpu_transfer(gpu0_id, gpu1_id, num_elements, iterations, return_dict):
-    torch.cuda.set_device(gpu0_id)
-    src_tensor = torch.randn(num_elements, device=f'cuda:{gpu0_id}', dtype=torch.float32)
-    dest_tensor = torch.empty(num_elements, device=f'cuda:{gpu1_id}', dtype=torch.float32)
-
-    # Warm-up
-    torch.cuda.synchronize()
-    dest_tensor.copy_(src_tensor)
-    torch.cuda.synchronize()
-
-    # Measure copy bandwidth
-    torch.cuda.synchronize()
-    start_time = time.time()
-    for _ in range(iterations):
-        dest_tensor.copy_(src_tensor)
-    torch.cuda.synchronize()
-    end_time = time.time()
-
-    total_copy_time = end_time - start_time
-    average_copy_time = total_copy_time / iterations
-    return_dict['copy_time'] = average_copy_time
-    del src_tensor
-    del dest_tensor
-    torch.cuda.empty_cache()
-
-# GPU Benchmark Functions
-def benchmark_gpu_data_generation(data_size_gb, reference_metrics, gpu_ids=None):
-    """
-    Generates large tensors of random numbers directly on the GPUs to benchmark GPU memory bandwidth.
-    """
-    try:
-        if gpu_ids is None:
-            if torch.cuda.is_available():
-                num_gpus = torch.cuda.device_count()
-                gpu_ids = list(range(num_gpus))
-            else:
-                num_gpus = 0
-                gpu_ids = []
-        else:
-            num_gpus = len(gpu_ids)
-
-        if num_gpus == 0:
-            print("No GPUs available for GPU Data Generation benchmark.")
-            return None
-
-        if num_gpus > 1:
-            print(f"Using {num_gpus} GPUs for GPU Data Generation")
-        else:
-            print("Using 1 GPU for GPU Data Generation")
-
-        # Calculate total number of elements per GPU
-        num_elements_per_gpu = int(((data_size_gb * 1e9) / 4) / num_gpus)
-
-        manager = mp.Manager()
-        return_dict = manager.dict()
-        processes = []
-
-        for gpu_id in gpu_ids:
-            p = mp.Process(target=run_data_generation_on_gpu, args=(gpu_id, num_elements_per_gpu, return_dict))
-            p.start()
-            processes.append(p)
-
-        for p in processes:
-            p.join()
-
-        # Collect per-GPU times
-        gen_times = return_dict.values()
-        # Calculate per-GPU bandwidths
-        per_gpu_bandwidths = []
-        data_size_bytes_per_gpu = num_elements_per_gpu * 4  # float32
-        data_size_gb_per_gpu = data_size_bytes_per_gpu / 1e9
-        for gen_time in gen_times:
-            bw = data_size_gb_per_gpu / gen_time if gen_time > 0 else 0
-            per_gpu_bandwidths.append(bw)
-
-        # Total bandwidth is sum of per-GPU bandwidths
-        total_bandwidth = sum(per_gpu_bandwidths)
-
-        # Total execution time is the maximum of the per-GPU times (since processes run in parallel)
-        total_time = max(gen_times)
-
-        # Total data size generated
-        data_size_bytes_total = data_size_bytes_per_gpu * num_gpus
-        data_size_gb_actual = data_size_bytes_total / 1e9
-
-        result = {
-            'task': 'GPU Data Generation',
-            'input_params': f'Data Size: {data_size_gb} GB',
-            'data_size_gb': data_size_gb_actual,
-            'time_seconds': total_time,
-            'bandwidth_gb_per_second': total_bandwidth,
-            'execution_time': total_time,
-            'score': (total_bandwidth / reference_metrics['gpu_data_generation_bandwidth']) * 100
-        }
-
-        return result
-
-    except RuntimeError as e:
-        print(f"Error during GPU data generation: {e}")
-        return None
-
-def benchmark_gpu_to_cpu_transfer(data_size_gb, reference_metrics):
-    """
-    Transfers large tensors from the GPUs to the CPU to benchmark PCIe bandwidth.
-    """
-    try:
-        num_gpus = torch.cuda.device_count()
-        if num_gpus == 0:
-            print("No GPUs available for GPU to CPU Transfer benchmark.")
-            return None
-
-        if num_gpus > 1:
-            print(f"Using {num_gpus} GPUs for GPU to CPU Transfer")
-        else:
-            print("Using 1 GPU for GPU to CPU Transfer")
-
-        num_elements_per_gpu = int(((data_size_gb * 1e9) / 4) / num_gpus)
-
-        manager = mp.Manager()
-        return_dict = manager.dict()
-        processes = []
-
-        for i in range(num_gpus):
-            p = mp.Process(target=run_gpu_to_cpu_transfer_on_gpu, args=(i, num_elements_per_gpu, return_dict))
-            p.start()
-            processes.append(p)
-
-        for p in processes:
-            p.join()
-
-        transfer_times = return_dict.values()
-        max_transfer_time = max(transfer_times)
-        data_size_bytes = num_elements_per_gpu * 4 * num_gpus  # float32
-        data_size_gb_actual = data_size_bytes / 1e9
-        transfer_bandwidth = data_size_gb_actual / max_transfer_time if max_transfer_time > 0 else float('inf')
-
-        result = {
-            'task': 'GPU to CPU Transfer',
-            'input_params': f'Data Size: {data_size_gb} GB',
-            'data_size_gb': data_size_gb_actual,
-            'time_seconds': max_transfer_time,
-            'bandwidth_gb_per_second': transfer_bandwidth,
-            'execution_time': max_transfer_time,
-            'score': (transfer_bandwidth / reference_metrics['gpu_to_cpu_transfer_bandwidth']) * 100
-        }
-
-        return result
-
-    except RuntimeError as e:
-        print(f"Error during GPU to CPU transfer: {e}")
-        return None
-
-def benchmark_gpu_to_gpu_transfer(data_size_gb, reference_metrics):
-    """
-    Measures GPU to GPU data transfer bandwidth.
-    """
-    try:
-        num_gpus = torch.cuda.device_count()
-        if num_gpus < 2:
-            print("At least two GPUs are required for GPU to GPU Transfer benchmark.")
-            return None
-
-        print(f"Using GPUs 0 and 1 for GPU to GPU Transfer")
-
-        # Generate data on GPU 0
-        num_elements = int((data_size_gb * 1e9) / 4)  # float32
-        iterations = 10  # Number of times to repeat the copy
-
-        manager = mp.Manager()
-        return_dict = manager.dict()
-        p = mp.Process(target=run_gpu_to_gpu_transfer, args=(0, 1, num_elements, iterations, return_dict))
-        p.start()
-        p.join()
-
-        average_copy_time = return_dict['copy_time']
-        data_size_bytes = num_elements * 4
-        data_size_gb_actual = data_size_bytes / 1e9
-        bandwidth_gb_per_second = data_size_gb_actual / average_copy_time if average_copy_time > 0 else float('inf')
-
-        input_params = f"Data Size: {data_size_gb} GB"
-
-        result = {
-            'task': 'GPU to GPU Transfer',
-            'input_params': input_params,
-            'bandwidth_gb_per_second': bandwidth_gb_per_second,
-            'execution_time': average_copy_time * iterations,
-            'score': (bandwidth_gb_per_second / reference_metrics['gpu_to_gpu_transfer_bandwidth']) * 100
-        }
-
-        return result
-
-    except Exception as e:
-        print(f"Error during GPU to GPU transfer benchmarking: {e}")
-        return None
-
-def benchmark_gpu_memory_bandwidth(data_size_mb, reference_metrics):
-    """
-    Measures GPU memory bandwidth by performing large memory copy operations on the GPU.
-    """
-    try:
-        if not torch.cuda.is_available():
-            print("CUDA is not available. Cannot benchmark GPU Memory Bandwidth.")
-            return None
-
-        device = torch.device('cuda')
-
-        data_size = data_size_mb * 1024 * 1024  # Convert MB to bytes
-        num_elements = data_size // 4  # Number of float32 elements
-
-        # Generate data on GPU
-        src_tensor = torch.randn(num_elements, device=device, dtype=torch.float32)
-
-        # Warm-up
-        dest_tensor = src_tensor.clone()
-
-        # Measure copy bandwidth
-        torch.cuda.synchronize()
-        start_time = time.time()
-        dest_tensor = src_tensor.clone()
-        torch.cuda.synchronize()
-        end_time = time.time()
-
-        copy_time = end_time - start_time
-
-        if copy_time == 0:
-            bandwidth_gb_per_second = float('inf')
-        else:
-            bandwidth_gb_per_second = (data_size / copy_time) / 1e9
-
-        input_params = f"Data Size: {data_size_mb} MB"
-
-        result = {
-            'task': 'GPU Memory Bandwidth',
-            'input_params': input_params,
-            'bandwidth_gb_per_second': bandwidth_gb_per_second,
-            'execution_time': copy_time,
-            'score': (bandwidth_gb_per_second / reference_metrics['gpu_memory_bandwidth_gb_per_sec']) * 100
-        }
-
-        # Cleanup
-        del src_tensor
-        del dest_tensor
-        torch.cuda.empty_cache()
-
-        return result
-
-    except Exception as e:
-        print(f"Error during GPU memory bandwidth benchmarking: {e}")
-        # Return a result with zero bandwidth to avoid key errors
-        result = {
-            'task': 'GPU Memory Bandwidth',
-            'input_params': f"Data Size: {data_size_mb} MB",
-            'bandwidth_gb_per_second': 0.0,
-            'execution_time': 0.0,
-            'score': 0.0
-        }
-        return result
-
-def benchmark_tensor_cores(matrix_size, num_iterations, reference_metrics):
-    """
-    Benchmarks Tensor Core performance using mixed-precision matrix multiplication.
-    """
-    try:
-        if not torch.cuda.is_available():
-            print("CUDA is not available. Cannot benchmark Tensor Cores.")
-            return None
-
-        device = torch.device('cuda')
-
-        # Generate random matrices
-        A = torch.randn(matrix_size, matrix_size, device=device, dtype=torch.float16)
-        B = torch.randn(matrix_size, matrix_size, device=device, dtype=torch.float16)
-
-        # Warm-up
-        torch.cuda.synchronize()
-        C = torch.matmul(A, B)
-        torch.cuda.synchronize()
-
-        # Measure time for multiple iterations
-        start_time = time.time()
-        for _ in range(num_iterations):
-            C = torch.matmul(A, B)
-        torch.cuda.synchronize()
-        end_time = time.time()
-
-        total_time = end_time - start_time
-
-        # Calculate GFLOPS
-        total_flops = 2 * matrix_size ** 3 * num_iterations
-        gflops = total_flops / total_time / 1e9
-
-        input_params = f"Matrix Size: {matrix_size}, Iterations: {num_iterations}"
-
-        result = {
-            'task': 'Tensor Core Performance',
-            'input_params': input_params,
-            'gflops': gflops,
-            'execution_time': total_time,
-            'score': (gflops / reference_metrics['tensor_core_gflops']) * 100
-        }
-
-        # Cleanup
-        del A
-        del B
-        del C
-        torch.cuda.empty_cache()
-
-        return result
-
-    except Exception as e:
-        print(f"Error during Tensor Core benchmarking: {e}")
-        return None
-
-# Inference Benchmark Helper Functions (moved to top-level for multiprocessing)
-def run_inference_on_gpu(gpu_id, model_size, batch_size_per_gpu, input_size, output_size, iterations, return_dict):
-    if not torch.cuda.is_available():
-        print(f"CUDA is not available on GPU {gpu_id}.")
-        return
-
-    torch.cuda.set_device(gpu_id)
-
-    # Define model
-    class ConvNet(nn.Module):
-        def __init__(self, input_channels, num_classes, depth):
-            super(ConvNet, self).__init__()
-            layers = []
-            channels = input_channels
-            for _ in range(depth):
-                layers.append(nn.Conv2d(channels, channels * 2, kernel_size=3, padding=1))
-                layers.append(nn.ReLU())
-                layers.append(nn.MaxPool2d(2))
-                channels *= 2
-            layers.append(nn.AdaptiveAvgPool2d((1, 1)))
-            self.features = nn.Sequential(*layers)
-            self.classifier = nn.Linear(channels, num_classes)
-
-        def forward(self, x):
-            x = self.features(x)
-            x = x.view(x.size(0), -1)
-            x = self.classifier(x)
-            return x
-
-    input_channels = 3
-    num_classes = output_size
-    depth = model_size
-
-    model = ConvNet(input_channels, num_classes, depth).cuda(gpu_id)
-    model.eval()
-
-    # Generate input data
-    inputs = torch.randn(batch_size_per_gpu, input_channels, input_size, input_size, device=gpu_id)
-
-    # Warm-up
-    with torch.no_grad():
-        model(inputs)
-
-    torch.cuda.synchronize()
-
-    # Measure inference time
-    times = []
-    for _ in range(iterations):
-        torch.cuda.synchronize()
-        start_time = time.time()
-        with torch.no_grad():
-            outputs = model(inputs)
-        torch.cuda.synchronize()
-        end_time = time.time()
-        times.append(end_time - start_time)
-
-    total_inference_time = sum(times)
-    throughput = (batch_size_per_gpu * iterations) / total_inference_time  # Samples per second per GPU
-
-    return_dict[gpu_id] = {'throughput': throughput, 'time': total_inference_time}
-
-def run_resnet_inference_on_gpu(gpu_id, batch_size_per_gpu, input_size, iterations, return_dict):
-    if not torch.cuda.is_available():
-        print(f"CUDA is not available on GPU {gpu_id}.")
-        return
-
-    from torchvision.models import resnet50
-    torch.cuda.set_device(gpu_id)
-    model = resnet50(pretrained=False).cuda(gpu_id)
-    model.eval()
-
-    # Generate random input tensor
-    inputs = torch.randn(batch_size_per_gpu, 3, input_size, input_size, device=gpu_id)
-
-    # Warm-up
-    with torch.no_grad():
-        model(inputs)
-
-    torch.cuda.synchronize()
-
-    # Measure inference time
-    times = []
-    for _ in range(iterations):
-        torch.cuda.synchronize()
-        start_time = time.time()
-        with torch.no_grad():
-            outputs = model(inputs)
-        torch.cuda.synchronize()
-        end_time = time.time()
-        times.append(end_time - start_time)
-
-    total_inference_time = sum(times)
-    throughput = (batch_size_per_gpu * iterations) / total_inference_time
-
-    return_dict[gpu_id] = {'throughput': throughput, 'time': total_inference_time}
-
-def run_bert_inference_on_gpu(gpu_id, batch_size_per_gpu, seq_length, iterations, return_dict):
-    if not torch.cuda.is_available():
-        print(f"CUDA is not available on GPU {gpu_id}.")
-        return
-
-    from transformers import BertModel, BertConfig
-    torch.cuda.set_device(gpu_id)
-    config = BertConfig()
-    model = BertModel(config).cuda(gpu_id)
-    model.eval()
-
-    # Generate random input tensor
-    inputs = torch.randint(0, config.vocab_size, (batch_size_per_gpu, seq_length), device=gpu_id)
-
-    # Warm-up
-    with torch.no_grad():
-        model(inputs)
-
-    torch.cuda.synchronize()
-
-    # Measure inference time
-    times = []
-    for _ in range(iterations):
-        torch.cuda.synchronize()
-        start_time = time.time()
-        with torch.no_grad():
-            outputs = model(inputs)
-        torch.cuda.synchronize()
-        end_time = time.time()
-        times.append(end_time - start_time)
-
-    total_inference_time = sum(times)
-    throughput = (batch_size_per_gpu * iterations) / total_inference_time
-
-    return_dict[gpu_id] = {'throughput': throughput, 'time': total_inference_time}
-
-def run_gpt_inference_on_gpu(gpu_id, batch_size_per_gpu, seq_length, iterations, return_dict):
-    if not torch.cuda.is_available():
-        print(f"CUDA is not available on GPU {gpu_id}.")
-        return
-
-    from transformers import GPT2Model, GPT2Config
-    torch.cuda.set_device(gpu_id)
-    config = GPT2Config()
-    model = GPT2Model(config).cuda(gpu_id)
-    model.eval()
-
-    # Generate random input tensor
-    inputs = torch.randint(0, config.vocab_size, (batch_size_per_gpu, seq_length), device=gpu_id)
-
-    # Warm-up
-    with torch.no_grad():
-        model(inputs)
-
-    torch.cuda.synchronize()
-
-    # Measure inference time
-    times = []
-    for _ in range(iterations):
-        torch.cuda.synchronize()
-        start_time = time.time()
-        with torch.no_grad():
-            outputs = model(inputs)
-        torch.cuda.synchronize()
-        end_time = time.time()
-        times.append(end_time - start_time)
-
-    total_inference_time = sum(times)
-    throughput = (batch_size_per_gpu * iterations) / total_inference_time
-
-    return_dict[gpu_id] = {'throughput': throughput, 'time': total_inference_time}
-
-def run_computational_benchmark_on_gpu(gpu_id, epochs, batch_size_per_gpu, input_size, hidden_size, output_size, reference_metrics, return_dict):
-    if not torch.cuda.is_available():
-        print(f"CUDA is not available on GPU {gpu_id}.")
-        return
-
-    torch.cuda.set_device(gpu_id)
-
-    # Define the neural network
-    class ComplexNet(nn.Module):
-        def __init__(self, input_size, hidden_size, output_size):
-            super(ComplexNet, self).__init__()
-            self.layers = nn.ModuleList()
-            # Add multiple layers to increase depth
-            self.layers.append(nn.Linear(input_size, hidden_size))
-            for _ in range(10):  # Increase the number of layers
-                self.layers.append(nn.Linear(hidden_size, hidden_size))
-            self.layers.append(nn.Linear(hidden_size, output_size))
-            self.relu = nn.ReLU()
-
-        def forward(self, x):
-            for layer in self.layers[:-1]:
-                x = self.relu(layer(x))
-            x = self.layers[-1](x)
-            return x
-
-    model = ComplexNet(input_size, hidden_size, output_size).cuda(gpu_id)
-    model.train()
-
-    criterion = nn.MSELoss().cuda(gpu_id)
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-
-    # Generate random input and target tensors
-    inputs = torch.randn(batch_size_per_gpu, input_size, device=f'cuda:{gpu_id}')
-    targets = torch.randn(batch_size_per_gpu, output_size, device=f'cuda:{gpu_id}')
-
-    # Warm-up
-    torch.cuda.synchronize(gpu_id)
-    outputs = model(inputs)
-    loss = criterion(outputs, targets)
-    loss.backward()
-    optimizer.step()
-    torch.cuda.synchronize(gpu_id)
-
-    # Measure time for multiple epochs
-    torch.cuda.synchronize(gpu_id)
-    start = time.time()
-    for epoch in range(epochs):
-        optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs, targets)
-        loss.backward()
-        optimizer.step()
-    torch.cuda.synchronize(gpu_id)
-    end = time.time()
-
-    total_time = end - start
-
-    # Adjusted FLOPS calculation
-    total_operations = 0
-    for layer in model.layers:
-        if isinstance(layer, nn.Linear):
-            in_features = layer.in_features
-            out_features = layer.out_features
-            total_operations += 2 * in_features * out_features
-    total_operations *= batch_size_per_gpu  # Multiply by batch size per GPU
-    total_flops = total_operations * epochs * 2  # Multiply by 2 for forward and backward passes
-
-    gflops = total_flops / total_time / 1e9
-
-    return_dict[gpu_id] = {'gflops': gflops, 'time': total_time}
-
-def benchmark_computational_task(epochs, batch_size, input_size, hidden_size, output_size, reference_metrics, gpu_ids=None):
-    """
-    Performs a computationally intensive task to benchmark GPU computational performance across multiple GPUs.
-    """
-    try:
-        if gpu_ids is None:
-            # Get available GPU IDs
-            gpu_ids = list(range(torch.cuda.device_count()))
-
-        num_gpus = len(gpu_ids)
-        if num_gpus == 0:
-            print("No GPUs available for Computationally Intensive Task benchmark.")
-            return None
-
-        # Determine batch size per GPU
-        batch_size_per_gpu = batch_size // num_gpus
-
-        manager = mp.Manager()
-        return_dict = manager.dict()
-
-        processes = []
-        for gpu_id in gpu_ids:
-            p = mp.Process(target=run_computational_benchmark_on_gpu, args=(
-                gpu_id,
-                epochs,
-                batch_size_per_gpu,
-                input_size,
-                hidden_size,
-                output_size,
-                reference_metrics,
-                return_dict
-            ))
-            p.start()
-            processes.append(p)
-
-        for p in processes:
-            p.join()
-
-        # Aggregate results
-        total_gflops = sum([v['gflops'] for v in return_dict.values()])
-        total_time = max([v['time'] for v in return_dict.values()])  # Use max time since processes run in parallel
-
-        input_params = (f"Epochs: {epochs}, Total Batch Size: {batch_size}, Input Size: {input_size}, "
-                        f"Hidden Size: {hidden_size}, Output Size: {output_size}, GPUs: {num_gpus}")
-
-        result = {
-            'task': 'Computationally Intensive Task',
-            'input_params': input_params,
-            'epochs': epochs,
-            'batch_size': batch_size,
-            'input_size': input_size,
-            'hidden_size': hidden_size,
-            'output_size': output_size,
-            'gpu_time_seconds': total_time,
-            'performance_gflops': total_gflops,
-            'execution_time': total_time,
-            'score': (total_gflops / reference_metrics['computational_task_gflops']) * 100
-        }
-
-        return result
-    except RuntimeError as e:
-        print(f"Error during computational task: {e}")
-        return None
-
 # CPU Benchmark Functions
 def benchmark_cpu_to_disk_write(file_path, data_size_gb, reference_metrics):
     """
     Writes data from CPU to disk to benchmark disk write performance.
     """
     try:
-        # Calculate total number of elements
-        num_elements = int((data_size_gb * 1e9) / 4)
+        # Calculate total number of elements based on precision
+        dtype = torch.float32  # Default dtype
+        element_size = 4       # Default element size in bytes
+        if torch.get_default_dtype() == torch.float16:
+            dtype = torch.float16
+            element_size = 2
+        elif torch.get_default_dtype() == torch.float64:
+            dtype = torch.float64
+            element_size = 8
+        elif torch.get_default_dtype() == torch.bfloat16:
+            dtype = torch.bfloat16
+            element_size = 2
+
+        num_elements = int((data_size_gb * 1e9) / element_size)
 
         # Generate data on CPU
-        cpu_data = torch.randn(num_elements, dtype=torch.float32)
+        cpu_data = torch.randn(num_elements, dtype=dtype)
 
         # Write data to disk
         start = time.time()
@@ -1001,15 +342,18 @@ def benchmark_cpu_to_disk_write(file_path, data_size_gb, reference_metrics):
         end = time.time()
 
         write_time = end - start
-        data_size_bytes = num_elements * 4  # float32
+        data_size_bytes = num_elements * element_size
         data_size_gb_actual = data_size_bytes / 1e9
         write_bandwidth = data_size_gb_actual / write_time if write_time > 0 else float('inf')
 
         input_params = f'Data Size: {data_size_gb} GB'
+        metrics = f"Bandwidth: {write_bandwidth:.2f} GB/s"
 
         result = {
             'task': 'CPU to Disk Write',
+            'category': 'System',
             'input_params': input_params,
+            'metrics': metrics,
             'data_size_gb': data_size_gb_actual,
             'time_seconds': write_time,
             'bandwidth_gb_per_second': write_bandwidth,
@@ -1066,10 +410,15 @@ def benchmark_cpu_single_thread(reference_metrics):
         data_proc_perf = (data_size_mb / data_proc_time)  # MB processed per second
 
         input_params = "Single-threaded CPU Benchmark"
+        metrics = (f"Comp Perf: {comp_perf:.2f} fib/sec, "
+                   f"Crypto Perf: {crypto_perf:.2f} MB/s, "
+                   f"Data Proc Perf: {data_proc_perf:.2f} MB/s")
 
         result = {
             'task': 'CPU Single-threaded Performance',
+            'category': 'System',
             'input_params': input_params,
+            'metrics': metrics,
             'fib_number': n,
             'comp_time_seconds': comp_time,
             'comp_perf': comp_perf,
@@ -1135,10 +484,15 @@ def benchmark_cpu_multi_thread(reference_metrics, num_threads):
         data_proc_perf = (data_size_mb * num_threads) / data_proc_time  # MB processed per second
 
         input_params = f"Multi-threaded CPU Benchmark with {num_threads} threads"
+        metrics = (f"Comp Perf: {comp_perf:.2f} fib/sec, "
+                   f"Crypto Perf: {crypto_perf:.2f} MB/s, "
+                   f"Data Proc Perf: {data_proc_perf:.2f} MB/s")
 
         result = {
             'task': 'CPU Multi-threaded Performance',
+            'category': 'System',
             'input_params': input_params,
+            'metrics': metrics,
             'fib_number': n,
             'comp_time_seconds': comp_time,
             'comp_perf': comp_perf,
@@ -1169,10 +523,23 @@ def benchmark_memory_bandwidth(memory_size_mb, reference_metrics):
     """
     try:
         data_size = memory_size_mb * 1024 * 1024  # Convert MB to bytes
-        array_size = data_size // 8  # Number of elements (float64)
+        dtype = np.float32  # Default dtype
+        element_size = 4    # Default element size in bytes
+
+        if torch.get_default_dtype() == torch.float16:
+            dtype = np.float16
+            element_size = 2
+        elif torch.get_default_dtype() == torch.float64:
+            dtype = np.float64
+            element_size = 8
+        elif torch.get_default_dtype() == torch.bfloat16:
+            dtype = np.float16  # numpy does not support bfloat16
+            element_size = 2
+
+        array_size = data_size // element_size  # Number of elements
 
         # Generate data
-        src_array = np.random.rand(array_size)
+        src_array = np.random.rand(array_size).astype(dtype)
 
         # Warm-up
         dest_array = np.copy(src_array)
@@ -1186,10 +553,13 @@ def benchmark_memory_bandwidth(memory_size_mb, reference_metrics):
         bandwidth_gb_per_sec = (data_size / copy_time) / 1e9
 
         input_params = f"Memory Size: {memory_size_mb} MB"
+        metrics = f"Bandwidth: {bandwidth_gb_per_sec:.2f} GB/s"
 
         result = {
             'task': 'Memory Bandwidth',
+            'category': 'System',
             'input_params': input_params,
+            'metrics': metrics,
             'memory_size_mb': memory_size_mb,
             'copy_time_seconds': copy_time,
             'bandwidth_gb_per_sec': bandwidth_gb_per_sec,
@@ -1238,7 +608,7 @@ def benchmark_disk_io(file_path, data_size_gb, block_size_kb, io_depth, num_jobs
         total_execution_time = 0.0
 
         for test in tests:
-            print(f"Running {test['name'].replace('_', ' ').title()} benchmark...")
+            print(f"Running Disk {test['name'].replace('_', ' ').title()} benchmark...")
             fio_cmd = [
                 'fio',
                 f'--name={test["name"]}',
@@ -1250,7 +620,7 @@ def benchmark_disk_io(file_path, data_size_gb, block_size_kb, io_depth, num_jobs
                 f'--iodepth={test["iodepth"]}',
                 f'--numjobs={test["numjobs"]}',
                 '--direct=1',
-                '--runtime=60',
+                '--runtime=15',
                 '--time_based',
                 '--group_reporting',
                 f'--output={test["name"]}_output.json',
@@ -1292,12 +662,21 @@ def benchmark_disk_io(file_path, data_size_gb, block_size_kb, io_depth, num_jobs
             if os.path.exists(f'{test["name"]}_output.json'):
                 os.remove(f'{test["name"]}_output.json')
 
-        input_params = (f"Data Size: {data_size_bytes} bytes, Block Size: {block_size_kb} KB, "
+        input_params = (f"Data Size: {data_size_gb} GB, Block Size: {block_size_kb} KB, "
                         f"IO Depth: {io_depth}, Num Jobs: {num_jobs}")
+
+        metrics = (
+            f"Seq Read: {results.get('sequential_read_throughput_mb_per_sec', 0):.2f} MB/s, "
+            f"Seq Write: {results.get('sequential_write_throughput_mb_per_sec', 0):.2f} MB/s, "
+            f"Rand Read IOPS: {int(results.get('random_read_iops', 0))}, "
+            f"Rand Write IOPS: {int(results.get('random_write_iops', 0))}"
+        )
 
         result = {
             'task': 'Disk I/O Performance',
+            'category': 'System',
             'input_params': input_params,
+            'metrics': metrics,
             'execution_time': total_execution_time,
             **results
         }
@@ -1321,36 +700,684 @@ def benchmark_disk_io(file_path, data_size_gb, block_size_kb, io_depth, num_jobs
         print(f"Error during disk I/O benchmarking: {e}")
         return None
 
-# Inference Benchmark Functions
-def benchmark_inference_performance_multi_gpu(model_size, batch_size, input_size, output_size, iterations, reference_metrics, gpu_ids=None):
+# GPU Benchmark Functions
+
+def validate_gpu_ids(gpu_ids):
+    available_gpus = [gpu.id for gpu in GPUtil.getGPUs()]
+    valid_gpu_ids = []
+    for gpu_id in gpu_ids:
+        if gpu_id in available_gpus:
+            valid_gpu_ids.append(gpu_id)
+        else:
+            print(f"Warning: GPU ID {gpu_id} is not available. It will be skipped.")
+    return valid_gpu_ids
+
+def map_physical_to_logical_gpu_ids(gpu_ids):
+    """
+    Maps physical GPU IDs to logical IDs after setting CUDA_VISIBLE_DEVICES.
+    """
+    physical_to_logical = {}
+    for logical_id, physical_id in enumerate(gpu_ids):
+        physical_to_logical[physical_id] = logical_id
+    return physical_to_logical
+
+def get_torch_dtype_from_precision(precision):
+    if precision == 'fp16':
+        return torch.float16
+    elif precision == 'fp32':
+        return torch.float32
+    elif precision == 'fp64':
+        return torch.float64
+    elif precision == 'bf16':
+        return torch.bfloat16
+    else:
+        return torch.float32  # Default
+
+def run_data_generation_on_gpu(logical_gpu_id, num_elements_per_gpu, dtype, return_dict):
+    try:
+        device = torch.device(f'cuda:{logical_gpu_id}')
+        torch.cuda.set_device(device)
+        start_time = time.time()
+        tensor = torch.randn(num_elements_per_gpu, device=device, dtype=dtype)
+        torch.cuda.synchronize()
+        end_time = time.time()
+        gen_time = end_time - start_time
+        return_dict[logical_gpu_id] = gen_time
+        del tensor
+        torch.cuda.empty_cache()
+    except Exception as e:
+        print(f"Error on logical GPU {logical_gpu_id} during data generation: {e}")
+        return_dict[logical_gpu_id] = None
+
+def run_gpu_to_cpu_transfer_on_gpu(logical_gpu_id, num_elements_per_gpu, dtype, return_dict):
+    try:
+        device = torch.device(f'cuda:{logical_gpu_id}')
+        torch.cuda.set_device(device)
+        data = torch.randn(num_elements_per_gpu, device=device, dtype=dtype)
+        torch.cuda.synchronize()
+        start_time = time.time()
+        cpu_data = data.cpu()
+        torch.cuda.synchronize()
+        end_time = time.time()
+        transfer_time = end_time - start_time
+        return_dict[logical_gpu_id] = transfer_time
+        del data
+        del cpu_data
+        torch.cuda.empty_cache()
+    except Exception as e:
+        print(f"Error on logical GPU {logical_gpu_id} during GPU to CPU transfer: {e}")
+        return_dict[logical_gpu_id] = None
+
+def run_gpu_to_gpu_transfer(logical_gpu0_id, logical_gpu1_id, num_elements, iterations, dtype, return_dict):
+    try:
+        device0 = torch.device(f'cuda:{logical_gpu0_id}')
+        device1 = torch.device(f'cuda:{logical_gpu1_id}')
+        torch.cuda.set_device(device0)
+        src_tensor = torch.randn(num_elements, device=device0, dtype=dtype)
+        dest_tensor = torch.empty(num_elements, device=device1, dtype=dtype)
+
+        # Warm-up
+        torch.cuda.synchronize()
+        dest_tensor.copy_(src_tensor)
+        torch.cuda.synchronize()
+
+        # Measure copy bandwidth
+        torch.cuda.synchronize()
+        start_time = time.time()
+        for _ in range(iterations):
+            dest_tensor.copy_(src_tensor)
+        torch.cuda.synchronize()
+        end_time = time.time()
+
+        total_copy_time = end_time - start_time
+        average_copy_time = total_copy_time / iterations
+        return_dict['copy_time'] = average_copy_time
+        del src_tensor
+        del dest_tensor
+        torch.cuda.empty_cache()
+    except Exception as e:
+        print(f"Error during GPU to GPU transfer: {e}")
+        return_dict['copy_time'] = None
+
+def benchmark_gpu_data_generation(data_size_gb, reference_metrics, precision, physical_gpu_ids=None):
+    """
+    Generates large tensors of random numbers directly on the GPUs to benchmark GPU memory bandwidth.
+    """
+    try:
+        dtype = get_torch_dtype_from_precision(precision)
+
+        if physical_gpu_ids is None:
+            if torch.cuda.is_available():
+                physical_gpu_ids = [gpu.id for gpu in GPUtil.getGPUs()]
+            else:
+                physical_gpu_ids = []
+        else:
+            physical_gpu_ids = validate_gpu_ids(physical_gpu_ids)
+
+        num_gpus = len(physical_gpu_ids)
+        if num_gpus == 0:
+            print("No valid GPUs available for GPU Data Generation benchmark.")
+            return None
+
+        # Map physical GPU IDs to logical IDs
+        physical_to_logical = map_physical_to_logical_gpu_ids(physical_gpu_ids)
+        logical_gpu_ids = list(range(num_gpus))
+
+        print(f"Using GPUs: {physical_gpu_ids} (logical IDs: {logical_gpu_ids}) for GPU Data Generation")
+
+        # Calculate total number of elements per GPU
+        element_size = torch.tensor([], dtype=dtype).element_size()
+        num_elements_per_gpu = int(((data_size_gb * 1e9) / element_size) / num_gpus)
+
+        manager = mp.Manager()
+        return_dict = manager.dict()
+        processes = []
+
+        for physical_id in physical_gpu_ids:
+            logical_id = physical_to_logical[physical_id]
+            p = mp.Process(target=run_data_generation_on_gpu, args=(logical_id, num_elements_per_gpu, dtype, return_dict))
+            p.start()
+            processes.append(p)
+
+        for p in processes:
+            p.join()
+
+        # Collect per-GPU times
+        gen_times = [t for t in return_dict.values() if t is not None]
+        if not gen_times:
+            print("No valid generation times collected.")
+            return None
+
+        # Calculate per-GPU bandwidths
+        per_gpu_bandwidths = []
+        data_size_bytes_per_gpu = num_elements_per_gpu * element_size
+        data_size_gb_per_gpu = data_size_bytes_per_gpu / 1e9
+        for gen_time in gen_times:
+            bw = data_size_gb_per_gpu / gen_time if gen_time > 0 else 0
+            per_gpu_bandwidths.append(bw)
+
+        # Total bandwidth is sum of per-GPU bandwidths
+        total_bandwidth = sum(per_gpu_bandwidths)
+
+        # Total execution time is the maximum of the per-GPU times (since processes run in parallel)
+        total_time = max(gen_times)
+
+        # Total data size generated
+        data_size_bytes_total = data_size_bytes_per_gpu * num_gpus
+        data_size_gb_actual = data_size_bytes_total / 1e9
+
+        metrics = f"Bandwidth: {total_bandwidth:.2f} GB/s"
+        input_params = f"Data Size: {data_size_gb} GB, Precision: {precision}"
+
+        result = {
+            'task': 'GPU Data Generation',
+            'category': 'GPU',
+            'input_params': input_params,
+            'metrics': metrics,
+            'data_size_gb': data_size_gb_actual,
+            'time_seconds': total_time,
+            'bandwidth_gb_per_second': total_bandwidth,
+            'execution_time': total_time,
+            'score': (total_bandwidth / reference_metrics['gpu_data_generation_bandwidth']) * 100
+        }
+
+        return result
+
+    except RuntimeError as e:
+        print(f"Error during GPU data generation: {e}")
+        return None
+
+def benchmark_gpu_to_cpu_transfer(data_size_gb, reference_metrics, precision, physical_gpu_ids=None):
+    """
+    Transfers large tensors from the GPUs to the CPU to benchmark PCIe bandwidth.
+    """
+    try:
+        dtype = get_torch_dtype_from_precision(precision)
+
+        if physical_gpu_ids is None:
+            if torch.cuda.is_available():
+                physical_gpu_ids = [gpu.id for gpu in GPUtil.getGPUs()]
+            else:
+                physical_gpu_ids = []
+        else:
+            physical_gpu_ids = validate_gpu_ids(physical_gpu_ids)
+
+        num_gpus = len(physical_gpu_ids)
+        if num_gpus == 0:
+            print("No valid GPUs available for GPU to CPU Transfer benchmark.")
+            return None
+
+        # Map physical GPU IDs to logical IDs
+        physical_to_logical = map_physical_to_logical_gpu_ids(physical_gpu_ids)
+        logical_gpu_ids = list(range(num_gpus))
+
+        print(f"Using GPUs: {physical_gpu_ids} (logical IDs: {logical_gpu_ids}) for GPU to CPU Transfer")
+
+        element_size = torch.tensor([], dtype=dtype).element_size()
+        num_elements_per_gpu = int(((data_size_gb * 1e9) / element_size) / num_gpus)
+
+        manager = mp.Manager()
+        return_dict = manager.dict()
+        processes = []
+
+        for physical_id in physical_gpu_ids:
+            logical_id = physical_to_logical[physical_id]
+            p = mp.Process(target=run_gpu_to_cpu_transfer_on_gpu, args=(logical_id, num_elements_per_gpu, dtype, return_dict))
+            p.start()
+            processes.append(p)
+
+        for p in processes:
+            p.join()
+
+        transfer_times = [t for t in return_dict.values() if t is not None]
+        if not transfer_times:
+            print("No valid transfer times collected.")
+            return None
+
+        max_transfer_time = max(transfer_times)
+        data_size_bytes = num_elements_per_gpu * element_size * num_gpus
+        data_size_gb_actual = data_size_bytes / 1e9
+        transfer_bandwidth = data_size_gb_actual / max_transfer_time if max_transfer_time > 0 else float('inf')
+
+        metrics = f"Bandwidth: {transfer_bandwidth:.2f} GB/s"
+        input_params = f"Data Size: {data_size_gb} GB, Precision: {precision}"
+
+        result = {
+            'task': 'GPU to CPU Transfer',
+            'category': 'GPU',
+            'input_params': input_params,
+            'metrics': metrics,
+            'data_size_gb': data_size_gb_actual,
+            'time_seconds': max_transfer_time,
+            'bandwidth_gb_per_second': transfer_bandwidth,
+            'execution_time': max_transfer_time,
+            'score': (transfer_bandwidth / reference_metrics['gpu_to_cpu_transfer_bandwidth']) * 100
+        }
+
+        return result
+
+    except RuntimeError as e:
+        print(f"Error during GPU to CPU transfer: {e}")
+        return None
+
+def benchmark_gpu_to_gpu_transfer(data_size_gb, reference_metrics, precision, physical_gpu_ids=None):
+    """
+    Measures GPU to GPU data transfer bandwidth.
+    """
+    try:
+        dtype = get_torch_dtype_from_precision(precision)
+
+        if physical_gpu_ids is None:
+            physical_gpu_ids = [gpu.id for gpu in GPUtil.getGPUs()]
+        else:
+            physical_gpu_ids = validate_gpu_ids(physical_gpu_ids)
+
+        if len(physical_gpu_ids) < 2:
+            print("At least two GPUs are required for GPU to GPU Transfer benchmark.")
+            return None
+
+        # Map physical GPU IDs to logical IDs
+        physical_to_logical = map_physical_to_logical_gpu_ids(physical_gpu_ids)
+
+        physical_gpu0_id, physical_gpu1_id = physical_gpu_ids[:2]
+        logical_gpu0_id = physical_to_logical[physical_gpu0_id]
+        logical_gpu1_id = physical_to_logical[physical_gpu1_id]
+
+        print(f"Using GPUs: {physical_gpu0_id} and {physical_gpu1_id} (logical IDs: {logical_gpu0_id} and {logical_gpu1_id}) for GPU to GPU Transfer")
+
+        # Generate data on GPU 0
+        element_size = torch.tensor([], dtype=dtype).element_size()
+        num_elements = int((data_size_gb * 1e9) / element_size)
+        iterations = 10  # Number of times to repeat the copy
+
+        manager = mp.Manager()
+        return_dict = manager.dict()
+        p = mp.Process(target=run_gpu_to_gpu_transfer, args=(logical_gpu0_id, logical_gpu1_id, num_elements, iterations, dtype, return_dict))
+        p.start()
+        p.join()
+
+        average_copy_time = return_dict.get('copy_time', None)
+        if average_copy_time is None:
+            print("Failed to collect copy time.")
+            return None
+
+        data_size_bytes = num_elements * element_size
+        data_size_gb_actual = data_size_bytes / 1e9
+        bandwidth_gb_per_second = data_size_gb_actual / average_copy_time if average_copy_time > 0 else float('inf')
+
+        input_params = f"Data Size: {data_size_gb} GB, Precision: {precision}"
+        metrics = f"Bandwidth: {bandwidth_gb_per_second:.2f} GB/s"
+
+        result = {
+            'task': 'GPU to GPU Transfer',
+            'category': 'GPU',
+            'input_params': input_params,
+            'metrics': metrics,
+            'bandwidth_gb_per_second': bandwidth_gb_per_second,
+            'execution_time': average_copy_time * iterations,
+            'score': (bandwidth_gb_per_second / reference_metrics['gpu_to_gpu_transfer_bandwidth']) * 100
+        }
+
+        return result
+
+    except Exception as e:
+        print(f"Error during GPU to GPU transfer benchmarking: {e}")
+        return None
+
+def benchmark_gpu_memory_bandwidth(data_size_mb, reference_metrics, precision):
+    """
+    Measures GPU memory bandwidth by performing large memory copy operations on the GPU.
+    """
+    try:
+        if not torch.cuda.is_available():
+            print("CUDA is not available. Cannot benchmark GPU Memory Bandwidth.")
+            return None
+
+        dtype = get_torch_dtype_from_precision(precision)
+        device = torch.device('cuda:0')  # Assuming single GPU for this benchmark
+
+        data_size = data_size_mb * 1024 * 1024  # Convert MB to bytes
+        element_size = torch.tensor([], dtype=dtype).element_size()
+        num_elements = data_size // element_size  # Number of elements
+
+        # Generate data on GPU
+        src_tensor = torch.randn(num_elements, device=device, dtype=dtype)
+
+        # Warm-up
+        dest_tensor = src_tensor.clone()
+
+        # Measure copy bandwidth
+        torch.cuda.synchronize()
+        start_time = time.time()
+        dest_tensor = src_tensor.clone()
+        torch.cuda.synchronize()
+        end_time = time.time()
+
+        copy_time = end_time - start_time
+
+        if copy_time == 0:
+            bandwidth_gb_per_second = float('inf')
+        else:
+            bandwidth_gb_per_second = (data_size / copy_time) / 1e9
+
+        input_params = f"Data Size: {data_size_mb} MB, Precision: {precision}"
+        metrics = f"Bandwidth: {bandwidth_gb_per_second:.2f} GB/s"
+
+        result = {
+            'task': 'GPU Memory Bandwidth',
+            'category': 'GPU',
+            'input_params': input_params,
+            'metrics': metrics,
+            'bandwidth_gb_per_second': bandwidth_gb_per_second,
+            'execution_time': copy_time,
+            'score': (bandwidth_gb_per_second / reference_metrics['gpu_memory_bandwidth_gb_per_sec']) * 100
+        }
+
+        # Cleanup
+        del src_tensor
+        del dest_tensor
+        torch.cuda.empty_cache()
+
+        return result
+
+    except Exception as e:
+        print(f"Error during GPU Memory Bandwidth benchmarking: {e}")
+        return None
+
+def benchmark_gpu_tensor_cores(matrix_size, num_iterations, reference_metrics, precision):
+    """
+    Benchmarks GPU Tensor Core performance using mixed-precision matrix multiplication.
+    """
+    try:
+        if not torch.cuda.is_available():
+            print("CUDA is not available. Cannot benchmark GPU Tensor Cores.")
+            return None
+
+        dtype = get_torch_dtype_from_precision(precision)
+        device = torch.device('cuda:0')  # Assuming single GPU for this benchmark
+
+        # Generate random matrices
+        A = torch.randn(matrix_size, matrix_size, device=device, dtype=dtype)
+        B = torch.randn(matrix_size, matrix_size, device=device, dtype=dtype)
+
+        # Warm-up
+        torch.cuda.synchronize()
+        C = torch.matmul(A, B)
+        torch.cuda.synchronize()
+
+        # Measure time for multiple iterations
+        start_time = time.time()
+        for _ in range(num_iterations):
+            C = torch.matmul(A, B)
+        torch.cuda.synchronize()
+        end_time = time.time()
+
+        total_time = end_time - start_time
+
+        # Calculate GFLOPS
+        total_flops = 2 * matrix_size ** 3 * num_iterations
+        gflops = total_flops / total_time / 1e9
+
+        input_params = f"Matrix Size: {matrix_size}, Iterations: {num_iterations}, Precision: {precision}"
+        metrics = f"GFLOPS: {gflops:.2f}"
+
+        result = {
+            'task': 'GPU Tensor Core Performance',
+            'category': 'GPU',
+            'input_params': input_params,
+            'metrics': metrics,
+            'gflops': gflops,
+            'execution_time': total_time,
+            'score': (gflops / reference_metrics['tensor_core_gflops']) * 100
+        }
+
+        # Cleanup
+        del A
+        del B
+        del C
+        torch.cuda.empty_cache()
+
+        return result
+
+    except Exception as e:
+        print(f"Error during GPU Tensor Core benchmarking: {e}")
+        return None
+
+def benchmark_gpu_computational_task(epochs, batch_size, input_size, hidden_size, output_size, reference_metrics, physical_gpu_ids=None, precision='fp16'):
+    """
+    Performs a computationally intensive task to benchmark GPU computational performance across multiple GPUs.
+    """
+    try:
+        dtype = get_torch_dtype_from_precision(precision)
+
+        if physical_gpu_ids is None:
+            if torch.cuda.is_available():
+                physical_gpu_ids = [gpu.id for gpu in GPUtil.getGPUs()]
+            else:
+                physical_gpu_ids = []
+        else:
+            physical_gpu_ids = validate_gpu_ids(physical_gpu_ids)
+
+        num_gpus = len(physical_gpu_ids)
+        if num_gpus == 0:
+            print("No valid GPUs available for GPU Computational Task benchmark.")
+            return None
+
+        # Map physical GPU IDs to logical IDs
+        physical_to_logical = map_physical_to_logical_gpu_ids(physical_gpu_ids)
+        logical_gpu_ids = list(range(num_gpus))
+
+        device = torch.device(f'cuda:{logical_gpu_ids[0]}')
+
+        class SimpleModel(nn.Module):
+            def __init__(self, input_size, hidden_size, output_size):
+                super(SimpleModel, self).__init__()
+                self.fc1 = nn.Linear(input_size, hidden_size)
+                self.relu = nn.ReLU()
+                self.fc2 = nn.Linear(hidden_size, output_size)
+
+            def forward(self, x):
+                out = self.fc1(x)
+                out = self.relu(out)
+                out = self.fc2(out)
+                return out
+
+        model = SimpleModel(input_size, hidden_size, output_size).to(device, dtype=dtype)
+
+        criterion = nn.MSELoss()
+        optimizer = optim.SGD(model.parameters(), lr=0.01)
+
+        # Generate random data
+        inputs = torch.randn(batch_size, input_size, device=device, dtype=dtype)
+        targets = torch.randn(batch_size, output_size, device=device, dtype=dtype)
+
+        # Warm-up
+        model(inputs)
+
+        # Training loop
+        torch.cuda.synchronize()
+        start_time = time.time()
+        for _ in range(epochs):
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+            loss.backward()
+            optimizer.step()
+        torch.cuda.synchronize()
+        end_time = time.time()
+
+        total_time = end_time - start_time
+
+        # Calculate GFLOPS
+        flops_per_sample = 2 * (input_size * hidden_size + hidden_size * output_size)
+        total_flops = flops_per_sample * batch_size * epochs
+        gflops = total_flops / total_time / 1e9
+
+        input_params = (f"Epochs: {epochs}, Batch Size: {batch_size}, Input Size: {input_size}, "
+                        f"Hidden Size: {hidden_size}, Output Size: {output_size}, Precision: {precision}")
+        metrics = f"GFLOPS: {gflops:.2f}"
+
+        result = {
+            'task': 'GPU Computational Task',
+            'category': 'GPU',
+            'input_params': input_params,
+            'metrics': metrics,
+            'performance_gflops': gflops,
+            'execution_time': total_time,
+            'score': (gflops / reference_metrics['computational_task_gflops']) * 100
+        }
+
+        # Cleanup
+        del model
+        del inputs
+        del targets
+        torch.cuda.empty_cache()
+
+        return result
+
+    except Exception as e:
+        print(f"Error during GPU Computational Task benchmarking: {e}")
+        return None
+
+def run_inference_on_gpu(logical_gpu_id, model_name, model_size, batch_size_per_gpu, input_size, output_size, iterations, dtype, return_dict):
+    try:
+        if not torch.cuda.is_available():
+            print(f"CUDA is not available on logical GPU {logical_gpu_id}.")
+            return
+
+        device = torch.device(f'cuda:{logical_gpu_id}')
+        torch.cuda.set_device(device)
+
+        if model_name.lower() == 'custom':
+            # Define custom model
+            class ConvNet(nn.Module):
+                def __init__(self, input_channels, num_classes, depth):
+                    super(ConvNet, self).__init__()
+                    layers = []
+                    channels = input_channels
+                    for _ in range(depth):
+                        layers.append(nn.Conv2d(channels, channels * 2, kernel_size=3, padding=1))
+                        layers.append(nn.ReLU())
+                        layers.append(nn.MaxPool2d(2))
+                        channels *= 2
+                    layers.append(nn.AdaptiveAvgPool2d((1, 1)))
+                    self.features = nn.Sequential(*layers)
+                    self.classifier = nn.Linear(channels, num_classes)
+
+                def forward(self, x):
+                    x = self.features(x)
+                    x = x.view(x.size(0), -1)
+                    x = self.classifier(x)
+                    return x
+
+            input_channels = 3
+            num_classes = output_size
+            depth = model_size
+
+            model = ConvNet(input_channels, num_classes, depth).to(device, dtype=dtype)
+        else:
+            # Load model based on the provided model name
+            if model_name.lower() == 'resnet50':
+                from torchvision.models import resnet50
+                model = resnet50(pretrained=False).to(device, dtype=dtype)
+            elif model_name.lower() == 'bert':
+                from transformers import BertModel, BertConfig
+                config = BertConfig()
+                model = BertModel(config).to(device, dtype=dtype)
+            elif model_name.lower() == 'gpt2':
+                from transformers import GPT2Model, GPT2Config
+                config = GPT2Config()
+                model = GPT2Model(config).to(device, dtype=dtype)
+            else:
+                print(f"Unsupported model name: {model_name}")
+                return
+
+        model.eval()
+
+        # Generate input data
+        if model_name.lower() in ['custom', 'resnet50']:
+            inputs = torch.randn(batch_size_per_gpu, 3, input_size, input_size, device=device, dtype=dtype)
+        elif model_name.lower() in ['bert', 'gpt2']:
+            seq_length = input_size  # For BERT and GPT-2, use input_size as sequence length
+            vocab_size = getattr(model.config, 'vocab_size', 30522)
+            inputs = torch.randint(0, vocab_size, (batch_size_per_gpu, seq_length), device=device, dtype=torch.long)
+        else:
+            print(f"Unsupported model name: {model_name}")
+            return
+
+        # Handle dtype for inputs if necessary
+        if dtype != torch.float32 and model_name.lower() in ['custom', 'resnet50']:
+            inputs = inputs.to(dtype=dtype)
+
+        # Warm-up
+        with torch.no_grad():
+            model(inputs)
+
+        torch.cuda.synchronize()
+
+        # Measure inference time
+        times = []
+        for _ in range(iterations):
+            torch.cuda.synchronize()
+            start_time = time.time()
+            with torch.no_grad():
+                outputs = model(inputs)
+            torch.cuda.synchronize()
+            end_time = time.time()
+            times.append(end_time - start_time)
+
+        total_inference_time = sum(times)
+        throughput = (batch_size_per_gpu * iterations) / total_inference_time  # Samples per second per GPU
+
+        return_dict[logical_gpu_id] = {'throughput': throughput, 'time': total_inference_time}
+
+    except Exception as e:
+        print(f"Error on logical GPU {logical_gpu_id} during inference benchmarking: {e}")
+        return_dict[logical_gpu_id] = None
+
+def benchmark_inference_performance_multi_gpu(model_name, model_size, batch_size, input_size, output_size, iterations, reference_metrics, precision, physical_gpu_ids=None):
     """
     Measures inference performance by running separate processes on each GPU.
     """
     try:
-        if gpu_ids is None:
-            # Get available GPU IDs
-            gpu_ids = list(range(torch.cuda.device_count()))
+        dtype = get_torch_dtype_from_precision(precision)
 
-        num_gpus = len(gpu_ids)
+        if physical_gpu_ids is None:
+            # Get available GPU IDs
+            physical_gpu_ids = [gpu.id for gpu in GPUtil.getGPUs()]
+        else:
+            physical_gpu_ids = validate_gpu_ids(physical_gpu_ids)
+
+        num_gpus = len(physical_gpu_ids)
         if num_gpus == 0:
-            print("No GPUs available for Inference Performance benchmark.")
+            print("No valid GPUs available for GPU Inference Performance benchmark.")
             return None
+
+        # Map physical GPU IDs to logical IDs
+        physical_to_logical = map_physical_to_logical_gpu_ids(physical_gpu_ids)
+        logical_gpu_ids = list(range(num_gpus))
 
         # Determine batch size per GPU
         batch_size_per_gpu = batch_size // num_gpus
+        if batch_size_per_gpu == 0:
+            print(f"Batch size {batch_size} is too small for {num_gpus} GPUs.")
+            return None
 
         manager = mp.Manager()
         return_dict = manager.dict()
 
         processes = []
-        for gpu_id in gpu_ids:
+        for physical_id in physical_gpu_ids:
+            logical_id = physical_to_logical[physical_id]
             p = mp.Process(target=run_inference_on_gpu, args=(
-                gpu_id,
+                logical_id,
+                model_name,
                 model_size,
                 batch_size_per_gpu,
                 input_size,
                 output_size,
                 iterations,
+                dtype,
                 return_dict
             ))
             p.start()
@@ -1360,16 +1387,24 @@ def benchmark_inference_performance_multi_gpu(model_size, batch_size, input_size
             p.join()
 
         # Aggregate results
-        total_throughput = sum([v['throughput'] for v in return_dict.values()])
-        total_time = max([v['time'] for v in return_dict.values()])  # Use max time since processes run in parallel
+        valid_results = [v for v in return_dict.values() if v is not None]
+        if not valid_results:
+            print("No valid inference results collected.")
+            return None
+
+        total_throughput = sum([v['throughput'] for v in valid_results])
+        total_time = max([v['time'] for v in valid_results])  # Use max time since processes run in parallel
         avg_latency = total_time / iterations
 
-        input_params = (f"Model Size: {model_size}, Total Batch Size: {batch_size}, "
-                        f"Input Size: {input_size}, Output Size: {output_size}, Iterations: {iterations}")
+        input_params = (f"Model: {model_name}, Model Size: {model_size}, Batch Size: {batch_size}, "
+                        f"Input Size: {input_size}, Output Size: {output_size}, Precision: {precision}")
+        metrics = f"Throughput: {total_throughput:.2f} samples/s"
 
         result = {
-            'task': 'Inference Performance',
+            'task': 'GPU Inference Performance',
+            'category': 'GPU',
             'input_params': input_params,
+            'metrics': metrics,
             'average_latency_seconds': avg_latency,
             'throughput_samples_per_second': total_throughput,
             'execution_time': total_time,
@@ -1382,190 +1417,39 @@ def benchmark_inference_performance_multi_gpu(model_size, batch_size, input_size
         print(f"Error during multi-GPU inference benchmarking: {e}")
         return None
 
-def benchmark_resnet_inference(batch_size, input_size, iterations, reference_metrics, gpu_ids=None):
-    """
-    Benchmarks ResNet50 inference performance.
-    """
-    try:
-        from torchvision.models import resnet50
-
-        if gpu_ids is None:
-            gpu_ids = list(range(torch.cuda.device_count()))
-
-        num_gpus = len(gpu_ids)
-        if num_gpus == 0:
-            print("No GPUs available for ResNet50 Inference benchmark.")
-            return None
-
-        batch_size_per_gpu = batch_size // num_gpus
-
-        manager = mp.Manager()
-        return_dict = manager.dict()
-
-        processes = []
-        for gpu_id in gpu_ids:
-            p = mp.Process(target=run_resnet_inference_on_gpu, args=(
-                gpu_id,
-                batch_size_per_gpu,
-                input_size,
-                iterations,
-                return_dict
-            ))
-            p.start()
-            processes.append(p)
-
-        for p in processes:
-            p.join()
-
-        total_throughput = sum([v['throughput'] for v in return_dict.values()])
-        total_time = max([v['time'] for v in return_dict.values()])
-        avg_latency = total_time / iterations
-
-        input_params = f"Batch Size: {batch_size}, Input Size: {input_size}, Iterations: {iterations}"
-
-        result = {
-            'task': 'ResNet50 Inference',
-            'input_params': input_params,
-            'average_latency_seconds': avg_latency,
-            'throughput_samples_per_second': total_throughput,
-            'execution_time': total_time,
-            'score': (total_throughput / reference_metrics['resnet_inference_throughput']) * 100
-        }
-
-        return result
-
-    except Exception as e:
-        print(f"Error during ResNet50 Inference benchmarking: {e}")
-        return None
-
-def benchmark_bert_inference(batch_size, seq_length, iterations, reference_metrics, gpu_ids=None):
-    """
-    Benchmarks BERT inference performance.
-    """
-    try:
-        from transformers import BertModel, BertConfig
-
-        if gpu_ids is None:
-            gpu_ids = list(range(torch.cuda.device_count()))
-
-        num_gpus = len(gpu_ids)
-        if num_gpus == 0:
-            print("No GPUs available for BERT Inference benchmark.")
-            return None
-
-        batch_size_per_gpu = batch_size // num_gpus
-
-        manager = mp.Manager()
-        return_dict = manager.dict()
-
-        processes = []
-        for gpu_id in gpu_ids:
-            p = mp.Process(target=run_bert_inference_on_gpu, args=(
-                gpu_id,
-                batch_size_per_gpu,
-                seq_length,
-                iterations,
-                return_dict
-            ))
-            p.start()
-            processes.append(p)
-
-        for p in processes:
-            p.join()
-
-        total_throughput = sum([v['throughput'] for v in return_dict.values()])
-        total_time = max([v['time'] for v in return_dict.values()])
-        avg_latency = total_time / iterations
-
-        input_params = f"Batch Size: {batch_size}, Sequence Length: {seq_length}, Iterations: {iterations}"
-
-        result = {
-            'task': 'BERT Inference',
-            'input_params': input_params,
-            'average_latency_seconds': avg_latency,
-            'throughput_samples_per_second': total_throughput,
-            'execution_time': total_time,
-            'score': (total_throughput / reference_metrics['bert_inference_throughput']) * 100
-        }
-
-        return result
-
-    except Exception as e:
-        print(f"Error during BERT Inference benchmarking: {e}")
-        return None
-
-def benchmark_gpt_inference(batch_size, seq_length, iterations, reference_metrics, gpu_ids=None):
-    """
-    Benchmarks GPT-2 inference performance.
-    """
-    try:
-        from transformers import GPT2Model, GPT2Config
-
-        if gpu_ids is None:
-            gpu_ids = list(range(torch.cuda.device_count()))
-
-        num_gpus = len(gpu_ids)
-        if num_gpus == 0:
-            print("No GPUs available for GPT-2 Inference benchmark.")
-            return None
-
-        batch_size_per_gpu = batch_size // num_gpus
-
-        manager = mp.Manager()
-        return_dict = manager.dict()
-
-        processes = []
-        for gpu_id in gpu_ids:
-            p = mp.Process(target=run_gpt_inference_on_gpu, args=(
-                gpu_id,
-                batch_size_per_gpu,
-                seq_length,
-                iterations,
-                return_dict
-            ))
-            p.start()
-            processes.append(p)
-
-        for p in processes:
-            p.join()
-
-        total_throughput = sum([v['throughput'] for v in return_dict.values()])
-        total_time = max([v['time'] for v in return_dict.values()])
-        avg_latency = total_time / iterations
-
-        input_params = f"Batch Size: {batch_size}, Sequence Length: {seq_length}, Iterations: {iterations}"
-
-        result = {
-            'task': 'GPT-2 Inference',
-            'input_params': input_params,
-            'average_latency_seconds': avg_latency,
-            'throughput_samples_per_second': total_throughput,
-            'execution_time': total_time,
-            'score': (total_throughput / reference_metrics['gpt_inference_throughput']) * 100
-        }
-
-        return result
-
-    except Exception as e:
-        print(f"Error during GPT-2 Inference benchmarking: {e}")
-        return None
-
 # Main Function
 def main():
     args = parse_arguments()
 
-    # Set CUDA_VISIBLE_DEVICES
+    # Set the default tensor type based on precision
+    set_default_tensor_type(args.precision)
+    dtype = get_torch_dtype_from_precision(args.precision)
+
+    # Validate and set CUDA_VISIBLE_DEVICES
     if args.gpus is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
-        gpu_ids = [int(id.strip()) for id in args.gpus.split(',')]
-        print(f"Using GPUs: {args.gpus}")
+        physical_gpu_ids = [int(id.strip()) for id in args.gpus.split(',')]
+        physical_gpu_ids = validate_gpu_ids(physical_gpu_ids)
+        if not physical_gpu_ids:
+            print("No valid GPUs specified. Exiting.")
+            sys.exit(1)
+        os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(map(str, physical_gpu_ids))
+        print(f"Using GPUs: {', '.join(map(str, physical_gpu_ids))}")
     else:
-        print("Using all available GPUs")
-        gpu_ids = None  # We'll determine available GPUs in the function
+        physical_gpu_ids = [gpu.id for gpu in GPUtil.getGPUs()]
+        if not physical_gpu_ids:
+            print("No GPUs found. Exiting.")
+            sys.exit(1)
+        os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(map(str, physical_gpu_ids))
+        print(f"Using all available GPUs: {', '.join(map(str, physical_gpu_ids))}")
+
+    # After setting CUDA_VISIBLE_DEVICES, logical GPU IDs start from 0
+    # Map physical GPU IDs to logical GPU IDs
+    physical_to_logical = map_physical_to_logical_gpu_ids(physical_gpu_ids)
+    logical_gpu_ids = list(range(len(physical_gpu_ids)))
 
     # Determine which benchmarks to run
     benchmarks_specified = any([
-        args.inference,
+        args.gpu_inference,
         args.disk_io,
         args.gpu_data_gen,
         args.gpu_to_cpu_transfer,
@@ -1574,17 +1458,14 @@ def main():
         args.cpu_single_thread,
         args.cpu_multi_thread,
         args.memory_bandwidth,
-        args.resnet_inference,
-        args.bert_inference,
-        args.gpt_inference,
-        args.tensor_core,
+        args.gpu_tensor,
         args.gpu_memory_bandwidth,
         args.gpu_to_gpu_transfer
     ])
 
     if args.all or not benchmarks_specified:
         # No specific benchmarks specified, so run default set
-        run_inference = False
+        run_gpu_inference = True
         run_disk_io = True
         run_gpu_data_gen = True
         run_gpu_to_cpu_transfer = True
@@ -1593,14 +1474,11 @@ def main():
         run_cpu_single_thread = True
         run_cpu_multi_thread = True
         run_memory_bandwidth = True
-        run_resnet_inference = False
-        run_bert_inference = False
-        run_gpt_inference = False
-        run_tensor_core = True
+        run_gpu_tensor = True
         run_gpu_memory_bandwidth = True
         run_gpu_to_gpu_transfer = True
     else:
-        run_inference = args.inference
+        run_gpu_inference = args.gpu_inference
         run_disk_io = args.disk_io
         run_gpu_data_gen = args.gpu_data_gen
         run_gpu_to_cpu_transfer = args.gpu_to_cpu_transfer
@@ -1609,10 +1487,7 @@ def main():
         run_cpu_single_thread = args.cpu_single_thread
         run_cpu_multi_thread = args.cpu_multi_thread
         run_memory_bandwidth = args.memory_bandwidth
-        run_resnet_inference = args.resnet_inference
-        run_bert_inference = args.bert_inference
-        run_gpt_inference = args.gpt_inference
-        run_tensor_core = args.tensor_core
+        run_gpu_tensor = args.gpu_tensor
         run_gpu_memory_bandwidth = args.gpu_memory_bandwidth
         run_gpu_to_gpu_transfer = args.gpu_to_gpu_transfer
 
@@ -1654,9 +1529,6 @@ def main():
         'cpu_multi_thread_crypto_perf': 400.0,    # MB/s
         'cpu_multi_thread_data_proc_perf': 400.0, # MB/s
         'memory_bandwidth_gb_per_sec': 2.0,       # GB/s
-        'resnet_inference_throughput': 500.0,     # Samples per second
-        'bert_inference_throughput': 100.0,       # Samples per second
-        'gpt_inference_throughput': 100.0,        # Samples per second
         'tensor_core_gflops': 5000.0,             # GFLOPS
         'gpu_memory_bandwidth_gb_per_sec': 500.0, # GB/s
     }
@@ -1669,96 +1541,81 @@ def main():
 
         if run_gpu_data_gen:
             print("Running GPU Data Generation benchmark...")
-            result = benchmark_gpu_data_generation(args.gpu_data_size_gb, reference_metrics)
+            result = benchmark_gpu_data_generation(
+                args.gpu_data_size_gb,
+                reference_metrics,
+                args.precision,
+                physical_gpu_ids=physical_gpu_ids
+            )
             results.append(result)
 
         if run_gpu_to_cpu_transfer:
             print("Running GPU to CPU Transfer benchmark...")
-            result = benchmark_gpu_to_cpu_transfer(args.gpu_data_size_gb, reference_metrics)
+            result = benchmark_gpu_to_cpu_transfer(
+                args.gpu_data_size_gb,
+                reference_metrics,
+                args.precision,
+                physical_gpu_ids=physical_gpu_ids
+            )
             results.append(result)
 
         if run_gpu_to_gpu_transfer:
             print("Running GPU to GPU Transfer benchmark...")
-            result = benchmark_gpu_to_gpu_transfer(args.gpu_data_size_gb, reference_metrics)
+            result = benchmark_gpu_to_gpu_transfer(
+                args.gpu_data_size_gb,
+                reference_metrics,
+                args.precision,
+                physical_gpu_ids=physical_gpu_ids
+            )
             results.append(result)
 
-        if run_cpu_to_disk_write:
-            print("Running CPU to Disk Write benchmark...")
-            output_file = f'benchmark_output_{iteration}.bin'
-            result = benchmark_cpu_to_disk_write(output_file, args.data_size_gb_cpu, reference_metrics)
-            results.append(result)
+        if run_gpu_tensor:
+            print("Running GPU Tensor Core Performance benchmark...")
+            tensor_core_result = benchmark_gpu_tensor_cores(
+                matrix_size=args.gpu_tensor_matrix_size,
+                num_iterations=args.gpu_tensor_iterations,
+                reference_metrics=reference_metrics,
+                precision=args.precision
+            )
+            results.append(tensor_core_result)
 
         if run_gpu_compute:
-            print("Running GPU Computationally Intensive Task benchmark...")
-            computational_result = benchmark_computational_task(
+            print("Running GPU Computational Task benchmark...")
+            computational_result = benchmark_gpu_computational_task(
                 epochs=args.gpu_comp_epochs,
                 batch_size=args.gpu_comp_batch_size,
                 input_size=args.gpu_comp_input_size,
                 hidden_size=args.gpu_comp_hidden_size,
                 output_size=args.gpu_comp_output_size,
                 reference_metrics=reference_metrics,
-                gpu_ids=gpu_ids
+                physical_gpu_ids=physical_gpu_ids,
+                precision=args.precision
             )
             results.append(computational_result)
 
-        if run_inference:
-            print("Running Inference Performance benchmark...")
+        if run_gpu_inference:
+            print("Running GPU Inference Performance benchmark...")
             inference_result = benchmark_inference_performance_multi_gpu(
+                model_name=args.gpu_inference_model,
                 model_size=args.model_size,
                 batch_size=args.batch_size,
                 input_size=args.input_size,
                 output_size=args.output_size,
                 iterations=args.iterations,
                 reference_metrics=reference_metrics,
-                gpu_ids=gpu_ids
+                precision=args.precision,
+                physical_gpu_ids=physical_gpu_ids
             )
             results.append(inference_result)
 
-        if run_resnet_inference:
-            print("Running ResNet50 Inference benchmark...")
-            resnet_result = benchmark_resnet_inference(
-                batch_size=args.resnet_batch_size,
-                input_size=args.resnet_input_size,
-                iterations=args.resnet_iterations,
+        if run_gpu_memory_bandwidth:
+            print("Running GPU Memory Bandwidth benchmark...")
+            gpu_mem_bw_result = benchmark_gpu_memory_bandwidth(
+                data_size_mb=args.gpu_memory_size_mb,
                 reference_metrics=reference_metrics,
-                gpu_ids=gpu_ids
+                precision=args.precision
             )
-            results.append(resnet_result)
-
-        if run_bert_inference:
-            print("Running BERT Inference benchmark...")
-            bert_result = benchmark_bert_inference(
-                batch_size=args.bert_batch_size,
-                seq_length=args.bert_seq_length,
-                iterations=args.bert_iterations,
-                reference_metrics=reference_metrics,
-                gpu_ids=gpu_ids
-            )
-            results.append(bert_result)
-
-        if run_gpt_inference:
-            print("Running GPT-2 Inference benchmark...")
-            gpt_result = benchmark_gpt_inference(
-                batch_size=args.gpt_batch_size,
-                seq_length=args.gpt_seq_length,
-                iterations=args.gpt_iterations,
-                reference_metrics=reference_metrics,
-                gpu_ids=gpu_ids
-            )
-            results.append(gpt_result)
-
-        if run_disk_io:
-            print("Running Disk I/O Performance benchmark...")
-            disk_file_path = f'disk_io_test_file_{iteration}.dat'
-            disk_result = benchmark_disk_io(
-                file_path=disk_file_path,
-                data_size_gb=args.disk_data_size,
-                block_size_kb=args.disk_block_size,
-                io_depth=args.disk_io_depth,
-                num_jobs=args.disk_num_jobs,
-                reference_metrics=reference_metrics
-            )
-            results.append(disk_result)
+            results.append(gpu_mem_bw_result)
 
         if run_cpu_single_thread:
             print("Running CPU Single-threaded Performance benchmark...")
@@ -1775,22 +1632,24 @@ def main():
             memory_bandwidth_result = benchmark_memory_bandwidth(args.memory_size_mb_cpu, reference_metrics)
             results.append(memory_bandwidth_result)
 
-        if run_tensor_core:
-            print("Running Tensor Core Performance benchmark...")
-            tensor_core_result = benchmark_tensor_cores(
-                matrix_size=args.tensor_core_matrix_size,
-                num_iterations=args.tensor_core_iterations,
-                reference_metrics=reference_metrics
-            )
-            results.append(tensor_core_result)
+        if run_cpu_to_disk_write:
+            print("Running CPU to Disk Write benchmark...")
+            output_file = f'benchmark_output_{iteration}.bin'
+            result = benchmark_cpu_to_disk_write(output_file, args.data_size_gb_cpu, reference_metrics)
+            results.append(result)
 
-        if run_gpu_memory_bandwidth:
-            print("Running GPU Memory Bandwidth benchmark...")
-            gpu_mem_bw_result = benchmark_gpu_memory_bandwidth(
-                data_size_mb=args.gpu_memory_size_mb,
+        if run_disk_io:
+            print("Running Disk I/O Performance benchmark...")
+            disk_file_path = f'disk_io_test_file_{iteration}.dat'
+            disk_result = benchmark_disk_io(
+                file_path=disk_file_path,
+                data_size_gb=args.disk_data_size,
+                block_size_kb=args.disk_block_size,
+                io_depth=args.disk_io_depth,
+                num_jobs=args.disk_num_jobs,
                 reference_metrics=reference_metrics
             )
-            results.append(gpu_mem_bw_result)
+            results.append(disk_result)
 
         all_results.extend(results)
 
@@ -1825,8 +1684,8 @@ def main():
             print(f"Total RAM (GB): {system_info['ram_info']['total_ram_gb']}")
             print(f"Total Disk (GB): {system_info['disk_info']['total_disk_gb']}")
 
-            for idx, gpu in enumerate(system_info['gpu_info']):
-                print(f"GPU {idx}:")
+            for gpu in system_info['gpu_info']:
+                print(f"GPU {gpu['id']}:")
                 print(f"  Name: {gpu['name']}")
                 print(f"  Total Memory (GB): {gpu['total_memory_gb']}")
                 print(f"  Driver Version: {gpu['driver_version']}")
