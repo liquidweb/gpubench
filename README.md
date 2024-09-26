@@ -9,10 +9,13 @@ With comparative scoring, users can benchmark similar systems to ensure consiste
 ### Key Features:
 - **GPU Memory Bandwidth**: Measure memory allocation and bandwidth across multiple GPUs.
 - **GPU to CPU Transfer**: Test PCIe transfer speeds between GPU and CPU.
+- **GPU to GPU Transfer**: Evaluate data transfer rates between GPUs.
 - **Disk I/O**: Benchmark read/write performance of the system's storage.
 - **Computationally Intensive Tasks**: Run deep learning models and synthetic tasks to test compute performance.
 - **Model Inference**: Benchmark common AI models like ResNet, BERT, GPT-2 for inference throughput and latency.
-
+- **CPU Performance**: Evaluate both single-threaded and multi-threaded CPU performance.
+- **Memory Bandwidth**: Measure system memory performance.
+- **Tensor Core Performance**: Benchmark GPU Tensor Core capabilities.
 ## Dependencies and Setup
 
 ### Python Dependencies
@@ -64,29 +67,34 @@ The following Python libraries are required:
 
 ## Command-Line Options
 
-GPUBench provides a variety of options to customize benchmarking for your specific use case. Below is a detailed list of available command-line arguments.
-
 ### General Options:
 - `--json`: Output results in JSON format.
 - `--detailed-output`: Show detailed benchmark results.
 - `--num-iterations N`: Number of times to run the benchmarks (default: 1).
 - `--log-gpu`: Enable GPU logging during benchmarks.
 - `--gpu-log-file FILE`: Specify GPU log file name (default: 'gpu_log.csv').
-- `--gpu-log-metrics METRICS`: Comma-separated list of GPU metrics to log (default: `timestamp,pstate,temperature.gpu,utilization.gpu,clocks.current.graphics,clocks.max.graphics,power.draw,clocks_throttle_reasons.active`).
-- `--gpus GPU_IDS`: Comma-separated list of GPU IDs to use (e.g., `0,1,2,3`).
+- `--gpu-log-metrics METRICS`: Comma-separated list of GPU metrics to log.
+- `--gpus GPU_IDS`: Comma-separated list of GPU IDs to use (e.g., "0,1,2,3").
+- `--precision {fp16,fp32,fp64,bf16}`: Precision to use for computations (default: fp16).
 
 ### GPU Benchmarks:
 - `--gpu-data-gen`: Run GPU Data Generation benchmark.
 - `--gpu-to-cpu-transfer`: Run GPU to CPU Transfer benchmark.
+- `--gpu-to-gpu-transfer`: Run GPU to GPU Transfer benchmark.
 - `--gpu-memory-bandwidth`: Run GPU Memory Bandwidth benchmark.
-- `--tensor-core`: Run Tensor Core Performance benchmark.
-- `--data-size-gb N`: Data size in GB for GPU benchmarks (default: 5.0).
-- `--memory-size-mb N`: Memory size in MB for GPU Memory Bandwidth benchmark (default: 1024).
-- `--tensor-core-matrix-size N`: Matrix size for Tensor Core benchmark (default: 4096).
-- `--tensor-core-iterations N`: Iterations for Tensor Core benchmark (default: 1000).
+- `--gpu-tensor`: Run GPU Tensor Core Performance benchmark.
+- `--gpu-compute`: Run GPU Computational Task benchmark.
+- `--gpu-data-size-gb N`: Data size in GB for GPU benchmarks (default: 5.0).
+- `--gpu-memory-size-mb N`: Memory size in MB for GPU Memory Bandwidth benchmark (default: 1024).
+- `--gpu-tensor-matrix-size N`: Matrix size for GPU Tensor Core benchmark (default: 4096).
+- `--gpu-tensor-iterations N`: Iterations for GPU Tensor Core benchmark (default: 1000).
+- `--gpu-comp-epochs N`: Number of epochs for GPU computational task (default: 200).
+- `--gpu-comp-batch-size N`: Batch size for GPU computational task (default: 2048).
+- `--gpu-comp-input-size N`: Input size for GPU computational task (default: 4096).
+- `--gpu-comp-hidden-size N`: Hidden layer size for GPU computational task (default: 4096).
+- `--gpu-comp-output-size N`: Output size for GPU computational task (default: 2000).
 
 ### CPU Benchmarks:
-- `--computational-task`: Run Computationally Intensive Task benchmark.
 - `--cpu-single-thread`: Run CPU Single-threaded Performance benchmark.
 - `--cpu-multi-thread`: Run CPU Multi-threaded Performance benchmark.
 - `--cpu-to-disk-write`: Run CPU to Disk Write benchmark.
@@ -94,39 +102,28 @@ GPUBench provides a variety of options to customize benchmarking for your specif
 - `--cpu-num-threads N`: Number of threads to use for multi-threaded CPU benchmark (default: all logical cores).
 - `--data-size-gb-cpu N`: Data size in GB for CPU to Disk Write benchmark (default: 5.0).
 - `--memory-size-mb-cpu N`: Memory size in MB for CPU Memory Bandwidth benchmark (default: 1024).
-- `--comp-epochs N`: Number of epochs for computational task (default: 200).
-- `--comp-batch-size N`: Batch size for computational task (default: 2048).
-- `--comp-input-size N`: Input size for computational task (default: 4096).
-- `--comp-hidden-size N`: Hidden layer size for computational task (default: 4096).
-- `--comp-output-size N`: Output size for computational task (default: 2000).
 
 ### Disk I/O Benchmarks:
 - `--disk-io`: Run Disk I/O Performance benchmark.
-- `--disk-data-size N`: Data size in GB for disk I/O benchmark (default: 4.0).
+- `--disk-data-size N`: Data size in GB for disk I/O benchmark (default: 2.0).
 - `--disk-block-size N`: Block size in KB for disk I/O benchmark (default: 4).
 - `--disk-io-depth N`: IO depth for disk I/O benchmark (default: 16).
 - `--disk-num-jobs N`: Number of concurrent jobs for disk I/O benchmark (default: 8).
 
-### Model-Specific Benchmarks:
-- `--resnet-inference`: Run ResNet50 Inference benchmark.
-- `--bert-inference`: Run BERT Inference benchmark.
-- `--gpt-inference`: Run GPT-2 Inference benchmark.
-- `--resnet-batch-size N`: Batch size for ResNet50 benchmark (default: 64).
-- `--resnet-input-size N`: Input size for ResNet50 benchmark (default: 224).
-- `--resnet-iterations N`: Iterations for ResNet50 benchmark (default: 100).
-- `--bert-batch-size N`: Batch size for BERT benchmark (default: 16).
-- `--bert-seq-length N`: Sequence length for BERT benchmark (default: 128).
-- `--bert-iterations N`: Iterations for BERT benchmark (default: 100).
-- `--gpt-batch-size N`: Batch size for GPT-2 benchmark (default: 8).
-- `--gpt-seq-length N`: Sequence length for GPT-2 benchmark (default: 128).
-- `--gpt-iterations N`: Iterations for GPT-2 benchmark (default: 100).
+### Inference Benchmarks:
+- `--gpu-inference`: Run GPU Inference Performance benchmark.
+- `--gpu-inference-model {custom,resnet50,bert,gpt2}`: Model to use for inference benchmark (default: custom).
+- `--model-size N`: Depth of the custom inference model (default: 5).
+- `--batch-size N`: Batch size for inference benchmark (default: 256).
+- `--input-size N`: Input size for inference benchmark (default: 224).
+- `--output-size N`: Output size for inference benchmark (default: 1000).
+- `--iterations N`: Number of iterations for inference benchmark (default: 100).
 
 ### Full Suite of Benchmarks:
 To run all benchmarks:
 ```bash
 python3 gpubench.py --all
 ```
-
 ## Example Usage:
 
 #### GPU Memory Bandwidth Test:
@@ -147,51 +144,76 @@ Benchmark Results:
 +---------------------------------+--------------------------------+----------------------------------------------------+-----------------+---------+
 | Task                            | Input                          | Metrics                                            |   Exec Time (s) |   Score |
 +=================================+================================+====================================================+=================+=========+
-| GPU Data Generation             | Data Size: 5.0 GB              | Bandwidth: 101.19 GB/s                             |            0.24 |   202.4 |
+| === GPU Benchmarks ===          |                                |                                                    |                 |         |
 +---------------------------------+--------------------------------+----------------------------------------------------+-----------------+---------+
-| GPU to CPU Transfer             | Data Size: 5.0 GB              | Bandwidth: 3.43 GB/s                               |            1.46 |    28.6 |
+| GPU Data Generation             | Data Size: 5.0 GB, Precision:  | Bandwidth: 59.38 GB/s                              |            0.38 |   118.8 |
+|                                 | fp16                           |                                                    |                 |         |
 +---------------------------------+--------------------------------+----------------------------------------------------+-----------------+---------+
-| GPU to GPU Transfer             | Data Size: 5.0 GB              | Bandwidth: 6.24 GB/s                               |            8.01 |    12.5 |
+| GPU to CPU Transfer             | Data Size: 5.0 GB, Precision:  | Bandwidth: 3.42 GB/s                               |            1.46 |    28.5 |
+|                                 | fp16                           |                                                    |                 |         |
 +---------------------------------+--------------------------------+----------------------------------------------------+-----------------+---------+
-| CPU to Disk Write               | Data Size: 5.0 GB              | Bandwidth: 0.86 GB/s                               |            5.84 |   342.5 |
+| GPU to GPU Transfer             | Data Size: 5.0 GB, Precision:  | Bandwidth: 6.24 GB/s                               |            8.01 |    12.5 |
+|                                 | fp16                           |                                                    |                 |         |
 +---------------------------------+--------------------------------+----------------------------------------------------+-----------------+---------+
-| Computationally Intensive Task  | Epochs: 200, Total Batch Size: | GFLOPS: 3058.29                                    |          103.84 |   305.8 |
-|                                 | 2048, Input Size: 4096, Hidden |                                                    |                 |         |
-|                                 | Size: 4096, Output Size: 2000, |                                                    |                 |         |
-|                                 | GPUs: 2                        |                                                    |                 |         |
+| GPU Tensor Core Performance     | Matrix Size: 4096, Iterations: | GFLOPS: 14136.45                                   |            9.72 |   282.7 |
+|                                 | 1000, Precision: fp16          |                                                    |                 |         |
 +---------------------------------+--------------------------------+----------------------------------------------------+-----------------+---------+
-| Disk I/O Performance            | Data Size: 4000000000 bytes,   | Seq Read: 2044.28 MB/s, Seq Write: 2256.65 MB/s,   |           245.5 |  3379.3 |
-|                                 | Block Size: 4 KB, IO Depth:    | Rand Read IOPS: 221380, Rand Write IOPS: 204206    |                 |         |
-|                                 | 16, Num Jobs: 8                |                                                    |                 |         |
+| GPU Computational Task          | Epochs: 200, Batch Size: 2048, | GFLOPS: 5357.17                                    |            3.82 |   535.7 |
+|                                 | Input Size: 4096, Hidden Size: |                                                    |                 |         |
+|                                 | 4096, Output Size: 2000,       |                                                    |                 |         |
+|                                 | Precision: fp16                |                                                    |                 |         |
 +---------------------------------+--------------------------------+----------------------------------------------------+-----------------+---------+
-| CPU Single-threaded Performance | Single-threaded CPU Benchmark  | Comp Perf: 240643.14 fib/sec, Crypto Perf: 379.44  |            5.96 |   151.7 |
-|                                 |                                | MB/s, Data Proc Perf: 27.65 MB/s                   |                 |         |
+| GPU Inference Performance       | Model: custom, Model Size: 5,  | Throughput: 8077.22 samples/s                      |            3.17 |   807.7 |
+|                                 | Batch Size: 256, Input Size:   |                                                    |                 |         |
+|                                 | 224, Output Size: 1000,        |                                                    |                 |         |
+|                                 | Precision: fp16                |                                                    |                 |         |
 +---------------------------------+--------------------------------+----------------------------------------------------+-----------------+---------+
-| CPU Multi-threaded Performance  | Multi-threaded CPU Benchmark   | Comp Perf: 1724948.15 fib/sec, Crypto Perf: 321.57 |           15.36 |   154.1 |
-|                                 | with 12 threads                | MB/s, Data Proc Perf: 147.26 MB/s                  |                 |         |
+| GPU Memory Bandwidth            | Data Size: 1024 MB, Precision: | Bandwidth: 80.60 GB/s                              |            0.01 |    16.1 |
+|                                 | fp16                           |                                                    |                 |         |
 +---------------------------------+--------------------------------+----------------------------------------------------+-----------------+---------+
-| Memory Bandwidth                | Memory Size: 1024 MB           | Bandwidth: 3.41 GB/s                               |            0.31 |   170.7 |
+| === System Benchmarks ===       |                                |                                                    |                 |         |
 +---------------------------------+--------------------------------+----------------------------------------------------+-----------------+---------+
-| Tensor Core Performance         | Matrix Size: 4096, Iterations: | GFLOPS: 14167.44                                   |             9.7 |   283.3 |
-|                                 | 1000                           |                                                    |                 |         |
+| CPU Single-threaded Performance | Single-threaded CPU Benchmark  | Comp Perf: 237918.08 fib/sec, Crypto Perf: 379.26  |            5.94 |   151.6 |
+|                                 |                                | MB/s, Data Proc Perf: 27.99 MB/s                   |                 |         |
 +---------------------------------+--------------------------------+----------------------------------------------------+-----------------+---------+
-| GPU Memory Bandwidth            | Data Size: 1024 MB             | Bandwidth: 79.33 GB/s                              |            0.01 |    15.9 |
+| CPU Multi-threaded Performance  | Multi-threaded CPU Benchmark   | Comp Perf: 226833.94 fib/sec, Crypto Perf: 4266.10 |           34.61 |   383.3 |
+|                                 | with 12 threads                | MB/s, Data Proc Perf: 152.40 MB/s                  |                 |         |
 +---------------------------------+--------------------------------+----------------------------------------------------+-----------------+---------+
-| Total Score / Exec. Time        |                                |                                                    |           428.6 |  5046.8 |
+| Memory Bandwidth                | Memory Size: 1024 MB           | Bandwidth: 3.55 GB/s                               |            0.30 |   177.7 |
 +---------------------------------+--------------------------------+----------------------------------------------------+-----------------+---------+
-
-```
-#### Full Benchmark Suite:
-```bash
-python3 gpubench.py --all
+| CPU to Disk Write               | Data Size: 5.0 GB              | Bandwidth: 0.73 GB/s                               |            6.87 |   291.3 |
++---------------------------------+--------------------------------+----------------------------------------------------+-----------------+---------+
+| Disk I/O Performance            | Data Size: 2.0 GB, Block Size: | Seq Read: 2102.66 MB/s, Seq Write: 2259.50 MB/s,   |          123.32 |  3328.9 |
+|                                 | 4 KB, IO Depth: 16, Num Jobs:  | Rand Read IOPS: 217145, Rand Write IOPS: 196169    |                 |         |
+|                                 | 8                              |                                                    |                 |         |
++---------------------------------+--------------------------------+----------------------------------------------------+-----------------+---------+
+| Total Score / Exec. Time        |                                |                                                    |          305.30 |  6134.9 |
++---------------------------------+--------------------------------+----------------------------------------------------+-----------------+---------+
 ```
 
 ## License
 
-This project is licensed under the GNU GPL v3 License. See the LICENSE file for more information.
+This project is licensed under the GNU General Public License v3.0 (GPL-3.0). 
 
 ```
-Licensed under the GNU GPL v3.
 Copyright (C) 2024 Liquid Web, LLC <deveng@liquidweb.com>
-Ryan MacDonald <rmacdonald@liquidweb.com>
+Copyright (C) 2024 Ryan MacDonald <rmacdonald@liquidweb.com>
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
 ```
+
+## Contributing
+
+Contributions to GPUBench are welcome! Please feel free to submit pull requests, create issues, or suggest improvements.
+
