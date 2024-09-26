@@ -1535,26 +1535,27 @@ def main():
             print("Failed to start GPU logging.")
 
     # Reference Metrics (adjusted as needed)
+    # 2024-09-26 1/4 of dual a16 / 12 vCore / 128G RAM / 700G NVMe
     reference_metrics = {
-        'gpu_data_generation_bandwidth': 50.0,    # GB/s
-        'gpu_to_cpu_transfer_bandwidth': 12.0,    # GB/s
-        'gpu_to_gpu_transfer_bandwidth': 50.0,    # GB/s
+        'gpu_data_generation_bandwidth': 20.0,    # GB/s
+        'gpu_to_cpu_transfer_bandwidth': 2.5,     # GB/s
+        'gpu_to_gpu_transfer_bandwidth': 5.0,     # GB/s
         'cpu_to_disk_write_bandwidth': 0.25,      # GB/s
-        'computational_task_gflops': 1000.0,      # GFLOPS
-        'inference_throughput': 1000.0,           # Samples per second
-        'sequential_read_throughput_mb_per_sec': 100.0,    # MB/s
-        'sequential_write_throughput_mb_per_sec': 90.0,    # MB/s
-        'random_read_iops': 5000.0,               # IOPS
-        'random_write_iops': 4500.0,              # IOPS
-        'cpu_single_thread_comp_perf': 500000.0,  # Fibonacci numbers per second
-        'cpu_single_thread_crypto_perf': 100.0,   # MB/s
-        'cpu_single_thread_data_proc_perf': 100.0,# MB/s
-        'cpu_multi_thread_comp_perf': 500000.0,   # Fibonacci numbers per second
-        'cpu_multi_thread_crypto_perf': 400.0,    # MB/s
-        'cpu_multi_thread_data_proc_perf': 400.0, # MB/s
-        'memory_bandwidth_gb_per_sec': 2.0,       # GB/s
+        'computational_task_gflops': 2500.0,      # GFLOPS
+        'inference_throughput': 4000.0,           # Samples per second
+        'sequential_read_throughput_mb_per_sec': 250.0,     # MB/s
+        'sequential_write_throughput_mb_per_sec': 250.0,    # MB/s
+        'random_read_iops': 10000.0,               # IOPS
+        'random_write_iops': 10000.0,              # IOPS
+        'cpu_single_thread_comp_perf': 175000.0,  # Fibonacci numbers per second
+        'cpu_single_thread_crypto_perf': 200.0,   # MB/s
+        'cpu_single_thread_data_proc_perf': 20.0, # MB/s
+        'cpu_multi_thread_comp_perf': 600000.0,   # Fibonacci numbers per second
+        'cpu_multi_thread_crypto_perf': 1000.0,    # MB/s
+        'cpu_multi_thread_data_proc_perf': 100.0, # MB/s
+        'memory_bandwidth_gb_per_sec': 3.0,       # GB/s
         'tensor_core_gflops': 5000.0,             # GFLOPS
-        'gpu_memory_bandwidth_gb_per_sec': 500.0, # GB/s
+        'gpu_memory_bandwidth_gb_per_sec': 40.0,  # GB/s
     }
 
     # Run benchmarks
