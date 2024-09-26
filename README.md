@@ -16,22 +16,32 @@ With comparative scoring, users can benchmark similar systems to ensure consiste
 - **CPU Performance**: Evaluate both single-threaded and multi-threaded CPU performance.
 - **Memory Bandwidth**: Measure system memory performance.
 - **Tensor Core Performance**: Benchmark GPU Tensor Core capabilities.
-## Dependencies and Setup
+
+## Requirements and Setup
+
+### System Requirements
+- **Operating System**: Linux (tested on Ubuntu 22.04/24.04 and Rocky/Alma Linux 9)
+- **Python 3.x**: The script requires Python 3.6 or newer.
+- **CUDA**: Ensure CUDA is properly installed to take full advantage of GPU benchmarks.
+- **Disk space**: At least 10GB of free disk space for benchmarking operations.
+
+### System Binaries and Libraries
+The following system binaries and libraries are required:
+- **fio**: Flexible I/O Tester, used for disk I/O benchmarks.
+- **nvidia-smi**: NVIDIA System Management Interface, used for GPU monitoring (typically installed with CUDA).
+- **libaio**: Linux native asynchronous I/O library, used by fio for disk benchmarks.
+- **CUDA libraries**: Required for GPU operations (installed with CUDA toolkit).
 
 ### Python Dependencies
 The following Python libraries are required:
-- `torch` (PyTorch framework)
-- `numpy` (for numerical operations)
-- `psutil` (for system and process utilities)
-- `GPUtil` (to monitor GPU usage)
-- `tabulate` (for formatting output as tables)
-- `transformers` (optional, for transformer models like BERT and GPT inference)
-- `torchvision` (optional, for ResNet and other image-related tasks)
+- `torch`: PyTorch framework for deep learning operations.
+- `numpy`: For numerical operations.
+- `psutil`: For system and process utilities.
+- `GPUtil`: To monitor GPU usage.
+- `tabulate`: For formatting output as tables.
+- `transformers`: For transformer models like BERT and GPT inference.
+- `torchvision`: For ResNet and other image-related tasks.
 
-### System Requirements
-- **Python 3.x**: The script requires Python 3.x.
-- **CUDA**: Ensure CUDA is properly installed to take full advantage of GPU benchmarks.
-  
 ### Installation Instructions
 
 #### Rocky/Alma Linux 9
