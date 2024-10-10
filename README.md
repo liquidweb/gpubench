@@ -89,7 +89,7 @@ The following Python libraries are required:
 - `--gpu-tensor`: Run GPU Tensor Core Performance benchmark.
 - `--gpu-compute`: Run GPU Computational Task benchmark.
 - `--gpu-data-size-gb N`: Data size in GB for GPU benchmarks (default: 5.0).
-- `--gpu-memory-size-mb N`: Memory size in MB for GPU Memory Bandwidth benchmark (default: 1024).
+- `--gpu-memory-size-gb N`: Memory size in GB for GPU Memory Bandwidth benchmark (default: 5.0).
 - `--gpu-tensor-matrix-size N`: Matrix size for GPU Tensor Core benchmark (default: 4096).
 - `--gpu-tensor-iterations N`: Iterations for GPU Tensor Core benchmark (default: 1000).
 - `--gpu-comp-epochs N`: Number of epochs for GPU computational task (default: 200).
@@ -172,7 +172,7 @@ Benchmark Results:
 |                                 | 224, Output Size: 1000,        |                                                   |                 |         |
 |                                 | Precision: fp16                |                                                   |                 |         |
 +---------------------------------+--------------------------------+---------------------------------------------------+-----------------+---------+
-| GPU Memory Bandwidth            | Data Size: 1024 MB, Precision: | Bandwidth: 80.00 GB/s                             |            0.01 |   200.0 |
+| GPU Memory Bandwidth            | Data Size: 5.0 GB, Precision:  | Bandwidth: 80.00 GB/s                             |            0.01 |   200.0 |
 |                                 | fp16                           |                                                   |                 |         |
 +---------------------------------+--------------------------------+---------------------------------------------------+-----------------+---------+
 | === System Benchmarks ===       |                                |                                                   |                 |         |
