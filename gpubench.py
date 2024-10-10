@@ -235,8 +235,8 @@ def parse_arguments():
     gpu_group.add_argument('--gpu-compute', action='store_true', help='Run GPU Computational Task benchmark')
     gpu_group.add_argument('--gpu-data-size-gb', type=float, default=5.0,
                            help='Data size in GB for GPU benchmarks (default: 5.0)')
-    gpu_group.add_argument('--gpu-memory-size-mb', type=int, default=1024,
-                           help='Memory size in MB for GPU Memory Bandwidth benchmark (default: 1024)')
+    gpu_group.add_argument('--gpu-memory-size-gb', type=float, default=5.0,
+                           help='Memory size in GB for GPU Memory Bandwidth benchmark (default: 5.0)')
     gpu_group.add_argument('--gpu-tensor-matrix-size', type=int, default=4096,
                            help='Matrix size for GPU Tensor Core benchmark (default: 4096)')
     gpu_group.add_argument('--gpu-tensor-iterations', type=int, default=1000,
@@ -1048,9 +1048,10 @@ def benchmark_gpu_to_gpu_transfer(data_size_gb, reference_metrics, precision, ph
         }
 
 
-def benchmark_gpu_memory_bandwidth(data_size_mb, reference_metrics, precision):
+def benchmark_gpu_memory_bandwidth(data_size_gb, reference_metrics, precision):
     """
     Measures GPU memory bandwidth by performing large memory copy operations on the GPU.
+    Accepts data size in gigabytes (GB) instead of megabytes (MB).
     """
     try:
         if not torch.cuda.is_available():
@@ -1060,21 +1061,25 @@ def benchmark_gpu_memory_bandwidth(data_size_mb, reference_metrics, precision):
         dtype = get_torch_dtype_from_precision(precision)
         device = torch.device('cuda:0')  # Assuming single GPU for this benchmark
 
-        data_size = data_size_mb * 1024 * 1024  # Convert MB to bytes
+        # Convert GB to bytes
+        data_size_bytes = data_size_gb * 1024 * 1024 * 1024  # GB to bytes conversion
         element_size = torch.tensor([], dtype=dtype).element_size()
-        num_elements = data_size // element_size  # Number of elements
+        num_elements = int(data_size_bytes // element_size)
 
         # Generate data on GPU
-        src_tensor = torch.randn(num_elements, device=device, dtype=dtype)
+        src_tensor = torch.randn((num_elements,), device=device, dtype=dtype)
+        src_tensor = torch.randn((num_elements,), device=device, dtype=dtype)
 
         # Warm-up
         dest_tensor = src_tensor.clone()
 
-        # Measure copy bandwidth
+        # Synchronize to ensure all operations are completed
         torch.cuda.synchronize()
+
+        # Measure copy bandwidth
         start_time = time.time()
         dest_tensor = src_tensor.clone()
-        torch.cuda.synchronize()
+        torch.cuda.synchronize()  # Ensure the operation is completed
         end_time = time.time()
 
         copy_time = end_time - start_time
@@ -1082,9 +1087,9 @@ def benchmark_gpu_memory_bandwidth(data_size_mb, reference_metrics, precision):
         if copy_time == 0:
             bandwidth_gb_per_second = float('inf')
         else:
-            bandwidth_gb_per_second = (data_size / copy_time) / 1e9
+            bandwidth_gb_per_second = data_size_gb / copy_time
 
-        input_params = f"Data Size: {data_size_mb} MB, Precision: {precision}"
+        input_params = f"Data Size: {data_size_gb} GB, Precision: {precision}"
         metrics = f"Bandwidth: {bandwidth_gb_per_second:.2f} GB/s"
 
         result = {
@@ -1636,7 +1641,7 @@ def main():
         if run_gpu_memory_bandwidth:
             print("Running GPU Memory Bandwidth benchmark...")
             gpu_mem_bw_result = benchmark_gpu_memory_bandwidth(
-                data_size_mb=args.gpu_memory_size_mb,
+                data_size_gb=args.gpu_memory_size_gb,
                 reference_metrics=reference_metrics,
                 precision=args.precision
             )
