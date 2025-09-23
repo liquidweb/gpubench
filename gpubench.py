@@ -1455,26 +1455,41 @@ def main():
     dtype = get_torch_dtype_from_precision(args.precision)
 
     # Validate and set CUDA_VISIBLE_DEVICES
+    physical_gpu_ids = set()
     if args.gpus is not None:
-        physical_gpu_ids = [int(id.strip()) for id in args.gpus.split(',')]
-        physical_gpu_ids = validate_gpu_ids(physical_gpu_ids)
-        if not physical_gpu_ids:
-            print("No valid GPUs specified. Exiting.")
-            sys.exit(1)
-        os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(map(str, physical_gpu_ids))
-        print(f"Using GPUs: {', '.join(map(str, physical_gpu_ids))}")
+        requested_gpu_ids = [int(id.strip()) for id in args.gpus.split(',')]
+        valid_gpu_ids = validate_gpu_ids(requested_gpu_ids)
+        if not valid_gpu_ids:
+            print("Warning: No valid GPUs specified. GPU benchmarks will be skipped.")
+        else:
+            physical_gpu_ids.update(valid_gpu_ids)
     else:
-        physical_gpu_ids = [gpu.id for gpu in GPUtil.getGPUs()]
-        if not physical_gpu_ids:
-            print("No GPUs found. Exiting.")
-            sys.exit(1)
-        os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(map(str, physical_gpu_ids))
-        print(f"Using all available GPUs: {', '.join(map(str, physical_gpu_ids))}")
+        detected_gpu_ids = [gpu.id for gpu in GPUtil.getGPUs()]
+        if not detected_gpu_ids:
+            print("Warning: No GPUs detected. GPU benchmarks will be skipped.")
+        physical_gpu_ids.update(detected_gpu_ids)
+
+    physical_gpu_id_list = sorted(physical_gpu_ids)
+    if physical_gpu_id_list:
+        visible_devices = ','.join(map(str, physical_gpu_id_list))
+        os.environ["CUDA_VISIBLE_DEVICES"] = visible_devices
+        if args.gpus is not None:
+            print(f"Using GPUs: {visible_devices}")
+        else:
+            print(f"Using all available GPUs: {visible_devices}")
+    else:
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+
+    gpu_available = bool(physical_gpu_id_list)
 
     # After setting CUDA_VISIBLE_DEVICES, logical GPU IDs start from 0
     # Map physical GPU IDs to logical GPU IDs
-    physical_to_logical = map_physical_to_logical_gpu_ids(physical_gpu_ids)
-    logical_gpu_ids = list(range(len(physical_gpu_ids)))
+    if gpu_available:
+        physical_to_logical = map_physical_to_logical_gpu_ids(physical_gpu_id_list)
+        logical_gpu_ids = list(range(len(physical_gpu_id_list)))
+    else:
+        physical_to_logical = {}
+        logical_gpu_ids = []
 
     # Determine which benchmarks to run
     benchmarks_specified = any([
@@ -1533,11 +1548,14 @@ def main():
     # Start GPU logging if enabled
     log_process = None
     if args.log_gpu:
-        log_process = start_gpu_logging(args.gpu_log_file, args.gpu_log_metrics)
-        if log_process:
-            print(f"GPU logging started, writing to {args.gpu_log_file}")
+        if gpu_available:
+            log_process = start_gpu_logging(args.gpu_log_file, args.gpu_log_metrics)
+            if log_process:
+                print(f"GPU logging started, writing to {args.gpu_log_file}")
+            else:
+                print("Failed to start GPU logging.")
         else:
-            print("Failed to start GPU logging.")
+            print("GPU logging requested but no GPUs are available; skipping GPU logging.")
 
     # Reference Metrics (adjusted as needed)
     # 2024-09-26 1/4 of dual a16 / 12 vCore / 128G RAM / 700G NVMe
@@ -1570,82 +1588,103 @@ def main():
         results = []
 
         if run_gpu_data_gen:
-            print("Running GPU Data Generation benchmark...")
-            result = benchmark_gpu_data_generation(
-                args.gpu_data_size_gb,
-                reference_metrics,
-                args.precision,
-                physical_gpu_ids=physical_gpu_ids
-            )
-            results.append(result)
+            if gpu_available:
+                print("Running GPU Data Generation benchmark...")
+                result = benchmark_gpu_data_generation(
+                    args.gpu_data_size_gb,
+                    reference_metrics,
+                    args.precision,
+                    physical_gpu_ids=physical_gpu_id_list
+                )
+                results.append(result)
+            else:
+                print("Skipping GPU Data Generation benchmark: no GPUs detected.")
 
         if run_gpu_to_cpu_transfer:
-            print("Running GPU to CPU Transfer benchmark...")
-            result = benchmark_gpu_to_cpu_transfer(
-                args.gpu_data_size_gb,
-                reference_metrics,
-                args.precision,
-                physical_gpu_ids=physical_gpu_ids
-            )
-            results.append(result)
+            if gpu_available:
+                print("Running GPU to CPU Transfer benchmark...")
+                result = benchmark_gpu_to_cpu_transfer(
+                    args.gpu_data_size_gb,
+                    reference_metrics,
+                    args.precision,
+                    physical_gpu_ids=physical_gpu_id_list
+                )
+                results.append(result)
+            else:
+                print("Skipping GPU to CPU Transfer benchmark: no GPUs detected.")
 
         if run_gpu_to_gpu_transfer:
-            print("Running GPU to GPU Transfer benchmark...")
-            result = benchmark_gpu_to_gpu_transfer(
-                args.gpu_data_size_gb,
-                reference_metrics,
-                args.precision,
-                physical_gpu_ids=physical_gpu_ids
-            )
-            results.append(result)
+            if gpu_available:
+                print("Running GPU to GPU Transfer benchmark...")
+                result = benchmark_gpu_to_gpu_transfer(
+                    args.gpu_data_size_gb,
+                    reference_metrics,
+                    args.precision,
+                    physical_gpu_ids=physical_gpu_id_list
+                )
+                results.append(result)
+            else:
+                print("Skipping GPU to GPU Transfer benchmark: no GPUs detected.")
 
         if run_gpu_tensor:
-            print("Running GPU Tensor Core Performance benchmark...")
-            tensor_core_result = benchmark_gpu_tensor_cores(
-                matrix_size=args.gpu_tensor_matrix_size,
-                num_iterations=args.gpu_tensor_iterations,
-                reference_metrics=reference_metrics,
-                precision=args.precision
-            )
-            results.append(tensor_core_result)
+            if gpu_available:
+                print("Running GPU Tensor Core Performance benchmark...")
+                tensor_core_result = benchmark_gpu_tensor_cores(
+                    matrix_size=args.gpu_tensor_matrix_size,
+                    num_iterations=args.gpu_tensor_iterations,
+                    reference_metrics=reference_metrics,
+                    precision=args.precision
+                )
+                results.append(tensor_core_result)
+            else:
+                print("Skipping GPU Tensor Core Performance benchmark: no GPUs detected.")
 
         if run_gpu_compute:
-            print("Running GPU Computational Task benchmark...")
-            computational_result = benchmark_gpu_computational_task(
-                epochs=args.gpu_comp_epochs,
-                batch_size=args.gpu_comp_batch_size,
-                input_size=args.gpu_comp_input_size,
-                hidden_size=args.gpu_comp_hidden_size,
-                output_size=args.gpu_comp_output_size,
-                reference_metrics=reference_metrics,
-                physical_gpu_ids=physical_gpu_ids,
-                precision=args.precision
-            )
-            results.append(computational_result)
+            if gpu_available:
+                print("Running GPU Computational Task benchmark...")
+                computational_result = benchmark_gpu_computational_task(
+                    epochs=args.gpu_comp_epochs,
+                    batch_size=args.gpu_comp_batch_size,
+                    input_size=args.gpu_comp_input_size,
+                    hidden_size=args.gpu_comp_hidden_size,
+                    output_size=args.gpu_comp_output_size,
+                    reference_metrics=reference_metrics,
+                    physical_gpu_ids=physical_gpu_id_list,
+                    precision=args.precision
+                )
+                results.append(computational_result)
+            else:
+                print("Skipping GPU Computational Task benchmark: no GPUs detected.")
 
         if run_gpu_inference:
-            print("Running GPU Inference Performance benchmark...")
-            inference_result = benchmark_inference_performance_multi_gpu(
-                model_name=args.gpu_inference_model,
-                model_size=args.model_size,
-                batch_size=args.batch_size,
-                input_size=args.input_size,
-                output_size=args.output_size,
-                iterations=args.iterations,
-                reference_metrics=reference_metrics,
-                precision=args.precision,
-                physical_gpu_ids=physical_gpu_ids
-            )
-            results.append(inference_result)
+            if gpu_available:
+                print("Running GPU Inference Performance benchmark...")
+                inference_result = benchmark_inference_performance_multi_gpu(
+                    model_name=args.gpu_inference_model,
+                    model_size=args.model_size,
+                    batch_size=args.batch_size,
+                    input_size=args.input_size,
+                    output_size=args.output_size,
+                    iterations=args.iterations,
+                    reference_metrics=reference_metrics,
+                    precision=args.precision,
+                    physical_gpu_ids=physical_gpu_id_list
+                )
+                results.append(inference_result)
+            else:
+                print("Skipping GPU Inference Performance benchmark: no GPUs detected.")
 
         if run_gpu_memory_bandwidth:
-            print("Running GPU Memory Bandwidth benchmark...")
-            gpu_mem_bw_result = benchmark_gpu_memory_bandwidth(
-                data_size_gb=args.gpu_memory_size_gb,
-                reference_metrics=reference_metrics,
-                precision=args.precision
-            )
-            results.append(gpu_mem_bw_result)
+            if gpu_available:
+                print("Running GPU Memory Bandwidth benchmark...")
+                gpu_mem_bw_result = benchmark_gpu_memory_bandwidth(
+                    data_size_gb=args.gpu_memory_size_gb,
+                    reference_metrics=reference_metrics,
+                    precision=args.precision
+                )
+                results.append(gpu_mem_bw_result)
+            else:
+                print("Skipping GPU Memory Bandwidth benchmark: no GPUs detected.")
 
         if run_cpu_single_thread:
             print("Running CPU Single-threaded Performance benchmark...")
