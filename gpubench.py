@@ -33,6 +33,8 @@ import hashlib
 import gzip
 import importlib
 import shutil
+import socket
+from datetime import datetime, timezone
 import numpy as np
 import psutil
 import GPUtil
@@ -58,6 +60,39 @@ def configure_logging():
     else:
         root_logger.setLevel(logging.INFO)
     logger.setLevel(logging.INFO)
+
+
+def parse_float(value):
+    """Safely parse a value into a float."""
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def run_nvidia_smi_query(query_fields):
+    """Query nvidia-smi for additional GPU telemetry information."""
+    if not is_command_available('nvidia-smi'):
+        return None, "`nvidia-smi` command is not available."
+
+    command = [
+        'nvidia-smi',
+        f"--query-gpu={','.join(query_fields)}",
+        '--format=csv,noheader,nounits'
+    ]
+
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        telemetry = []
+        for line in lines:
+            values = [value.strip() for value in line.split(',')]
+            telemetry.append(dict(zip(query_fields, values)))
+        return telemetry, None
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
+        message = f"Failed to query nvidia-smi: {exc}"
+        logger.warning(message)
+        return None, message
 
 
 def is_command_available(command):
@@ -197,44 +232,181 @@ def set_default_tensor_type(precision):
 
 # Utility Functions
 def get_system_info():
-    # CPU Information
+    """Collect a comprehensive snapshot of system configuration and health."""
+    uname = platform.uname()
+    boot_time = psutil.boot_time()
+    uptime_seconds = time.time() - boot_time if boot_time else None
+
+    cpu_freq = psutil.cpu_freq()
+    cpu_stats = psutil.cpu_stats()
+    load_avg = os.getloadavg() if hasattr(os, 'getloadavg') else (None, None, None)
+
+    cpu_model = platform.processor() or uname.processor or "Unknown"
+
     cpu_info = {
-        'cpu_model': platform.processor(),
-        'cpu_cores': psutil.cpu_count(logical=False),
-        'cpu_threads': psutil.cpu_count(logical=True),
+        'model': cpu_model,
+        'architecture': platform.machine(),
+        'physical_cores': psutil.cpu_count(logical=False),
+        'logical_cores': psutil.cpu_count(logical=True),
+        'current_frequency_mhz': round(cpu_freq.current, 2) if cpu_freq else None,
+        'max_frequency_mhz': round(cpu_freq.max, 2) if cpu_freq else None,
+        'min_frequency_mhz': round(cpu_freq.min, 2) if cpu_freq else None,
+        'load_average': load_avg,
+        'context_switches': getattr(cpu_stats, 'ctx_switches', None),
+        'interrupts': getattr(cpu_stats, 'interrupts', None),
+        'soft_interrupts': getattr(cpu_stats, 'soft_interrupts', None),
+        'syscalls': getattr(cpu_stats, 'syscalls', None),
     }
 
-    # RAM Information
     svmem = psutil.virtual_memory()
+    swap = psutil.swap_memory()
     ram_info = {
-        'total_ram_gb': round(svmem.total / (1024 ** 3), 2),
+        'total_gb': round(svmem.total / (1024 ** 3), 2),
+        'available_gb': round(svmem.available / (1024 ** 3), 2),
+        'used_gb': round(svmem.used / (1024 ** 3), 2),
+        'percent_used': svmem.percent,
     }
 
-    # Disk Information
+    swap_info = {
+        'total_gb': round(swap.total / (1024 ** 3), 2),
+        'used_gb': round(swap.used / (1024 ** 3), 2),
+        'percent_used': swap.percent,
+    }
+
     disk_usage = psutil.disk_usage('/')
     disk_info = {
-        'total_disk_gb': round(disk_usage.total / (1024 ** 3), 2),
+        'root_total_gb': round(disk_usage.total / (1024 ** 3), 2),
+        'root_used_percent': disk_usage.percent,
     }
 
-    # GPU Information
-    gpus, _ = safe_get_gpus("collecting system information")
+    disk_partitions = []
+    for partition in psutil.disk_partitions(all=False):
+        try:
+            usage = psutil.disk_usage(partition.mountpoint)
+        except PermissionError:
+            continue
+        disk_partitions.append({
+            'device': partition.device,
+            'mountpoint': partition.mountpoint,
+            'fstype': partition.fstype,
+            'total_gb': round(usage.total / (1024 ** 3), 2),
+            'used_percent': usage.percent,
+        })
+
+    gpus, gpu_warning = safe_get_gpus("collecting system information")
+
+    nvidia_query_fields = [
+        'index',
+        'name',
+        'driver_version',
+        'vbios_version',
+        'temperature.gpu',
+        'fan.speed',
+        'power.draw',
+        'power.limit',
+        'utilization.gpu',
+        'memory.total',
+        'memory.used',
+        'clocks.current.sm',
+        'clocks.current.memory'
+    ]
+    nvidia_telemetry, nvidia_error = run_nvidia_smi_query(nvidia_query_fields)
+    nvidia_telemetry_map = {}
+    if nvidia_telemetry:
+        for entry in nvidia_telemetry:
+            gpu_index = entry.get('index')
+            if gpu_index is not None:
+                nvidia_telemetry_map[str(gpu_index)] = entry
+
     gpu_info_list = []
     for gpu in gpus:
-        gpu_info = {
+        telemetry = nvidia_telemetry_map.get(str(gpu.id), {})
+        gpu_entry = {
             'id': gpu.id,
             'name': gpu.name,
             'total_memory_gb': round(gpu.memoryTotal / 1024, 2),
-            'driver_version': gpu.driver,
-            'cuda_version': torch.version.cuda,
+            'memory_used_gb': round(gpu.memoryUsed / 1024, 2),
+            'temperature_c': getattr(gpu, 'temperature', None),
+            'fan_speed_percent': getattr(gpu, 'fanSpeed', None),
+            'utilization_percent': getattr(gpu, 'load', None) * 100 if getattr(gpu, 'load', None) is not None else None,
+            'driver_version': telemetry.get('driver_version') or gpu.driver,
+            'vbios_version': telemetry.get('vbios_version'),
+            'power_draw_watts': parse_float(telemetry.get('power.draw')),
+            'power_limit_watts': parse_float(telemetry.get('power.limit')),
+            'sm_clock_mhz': parse_float(telemetry.get('clocks.current.sm')),
+            'memory_clock_mhz': parse_float(telemetry.get('clocks.current.memory')),
         }
-        gpu_info_list.append(gpu_info)
+        gpu_info_list.append(gpu_entry)
+
+    cuda_available = torch.cuda.is_available()
+    cuda_device_count = torch.cuda.device_count() if cuda_available else 0
+    cuda_devices = []
+    if cuda_available:
+        for logical_id in range(cuda_device_count):
+            try:
+                props = torch.cuda.get_device_properties(logical_id)
+                capability = f"{props.major}.{props.minor}"
+                cuda_devices.append({
+                    'logical_id': logical_id,
+                    'name': props.name,
+                    'total_memory_gb': round(props.total_memory / 1e9, 2),
+                    'multi_processor_count': props.multi_processor_count,
+                    'compute_capability': capability,
+                    'max_threads_per_block': props.max_threads_per_block,
+                })
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Unable to query CUDA device %s: %s", logical_id, exc)
+
+    torch_info = {
+        'version': torch.__version__,
+        'cuda_version': torch.version.cuda,
+        'cudnn_version': getattr(torch.backends.cudnn, 'version', lambda: None)(),
+        'cuda_available': cuda_available,
+        'device_count': cuda_device_count,
+        'devices': cuda_devices,
+    }
+
+    network_info = []
+    net_stats = psutil.net_if_stats()
+    for interface, stats in net_stats.items():
+        network_info.append({
+            'interface': interface,
+            'is_up': stats.isup,
+            'speed_mbps': stats.speed,
+            'mtu': stats.mtu,
+        })
+
+    environment = {
+        'python_executable': sys.executable,
+        'python_version': platform.python_version(),
+        'cuda_visible_devices': os.environ.get('CUDA_VISIBLE_DEVICES'),
+    }
+
+    system_overview = {
+        'hostname': socket.gethostname(),
+        'os': platform.platform(),
+        'kernel': uname.release,
+        'uptime_seconds': round(uptime_seconds, 2) if uptime_seconds is not None else None,
+        'timestamp_utc': datetime.now(timezone.utc).isoformat(),
+    }
 
     system_info = {
-        'cpu_info': cpu_info,
-        'ram_info': ram_info,
-        'disk_info': disk_info,
+        'system': system_overview,
+        'cpu': cpu_info,
+        'memory': ram_info,
+        'swap': swap_info,
+        'disk': disk_info,
+        'disk_partitions': disk_partitions,
+        'network_interfaces': network_info,
         'gpu_info': gpu_info_list,
+        'torch': torch_info,
+        'environment': environment,
     }
+
+    if gpu_warning:
+        system_info['gpu_warning'] = gpu_warning
+    if nvidia_error:
+        system_info['nvidia_smi_warning'] = nvidia_error
 
     return system_info
 
@@ -254,7 +426,7 @@ def start_gpu_logging(log_file, log_metrics):
         log_process = subprocess.Popen(log_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return log_process
     except Exception as e:
-        print(f"Error starting GPU logging: {e}")
+        _print_status("error", f"Error starting GPU logging: {e}")
         return None
 
 def stop_gpu_logging(log_process):
@@ -265,70 +437,561 @@ def stop_gpu_logging(log_process):
             # Wait for the process to terminate
             log_process.wait(timeout=5)
     except Exception as e:
-        print(f"Error stopping GPU logging: {e}")
+        _print_status("error", f"Error stopping GPU logging: {e}")
+
+def _print_heading(title):
+    """Render a consistent console heading banner using rounded outlines."""
+    banner = tabulate([[title]], tablefmt='rounded_outline', colalign=('center',))
+    print(f"\n{banner}")
+
+
+def _print_status(label, message, *, newline_before=False):
+    """Print a status line with a consistent prefix."""
+    prefix = f"[{label.upper()}]"
+    if newline_before:
+        print()
+    print(f"{prefix} {message}")
+
+
+def _print_section_table(title, rows, headers, *, tablefmt='rounded_grid', colalign=None, allow_empty=False):
+    """Print a tabular section where the title is folded into the header."""
+    if not rows and not allow_empty:
+        return
+
+    display_headers = list(headers) if headers else []
+    if display_headers:
+        display_headers[0] = f"{title} ▸ {display_headers[0]}"
+
+    print()
+    print(tabulate(rows, headers=display_headers, tablefmt=tablefmt, colalign=colalign))
+
+
+def _format_detail_value(value):
+    """Format detailed benchmark values for compact tabular display."""
+    if value is None:
+        return "N/A"
+
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+
+    if isinstance(value, (list, tuple)):
+        return "\n".join(str(item) for item in value)
+
+    if isinstance(value, dict):
+        return json.dumps(value, indent=2)
+
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f"{value:,}"
+
+    if isinstance(value, float):
+        formatted = f"{value:,.6f}".rstrip('0').rstrip('.')
+        return formatted
+
+    text = str(value)
+    if '\n' in text:
+        return text
+
+    return textwrap.fill(text, width=70)
+
 
 def print_detailed_results(results):
-    print("\n=== Detailed Benchmark Results ===")
+    if not results:
+        return
+
+    _print_heading("Detailed Benchmark Results")
+    field_preference = [
+        ("Input Parameters", "input_params"),
+        ("Metrics", "metrics"),
+        ("GFLOPS", "gflops"),
+        ("Execution Time (s)", "execution_time"),
+        ("Score", "score"),
+    ]
+
     for result in results:
-        if result is None:
+        if not result:
             continue
+
         task = result.get('task', 'Unknown Task')
-        print(f"\n--- {task} ---")
-        for key, value in result.items():
-            if key not in ['task', 'category']:
-                print(f"{key.replace('_', ' ').capitalize()}: {value}")
+        rows = []
+        seen_keys = set()
+
+        for label, key in field_preference:
+            if key in result and key not in {'task', 'category'}:
+                rows.append([label, _format_detail_value(result[key])])
+                seen_keys.add(key)
+
+        for key, value in sorted(result.items()):
+            if key in seen_keys or key in {'task', 'category'}:
+                continue
+            friendly_key = key.replace('_', ' ').title()
+            rows.append([friendly_key, _format_detail_value(value)])
+
+        _print_section_table(
+            task,
+            rows,
+            ["Field", "Value"],
+            tablefmt='rounded_grid',
+            colalign=('left', 'left'),
+            allow_empty=True,
+        )
 
 def print_results_table(results, total_score, total_execution_time):
-    # Prepare table data
-    table_data = []
+    """Render benchmark results grouped by category with consistent tables."""
+    if not results and total_score is None and total_execution_time is None:
+        return
+
     max_width_input = 30  # Maximum width for "Input" column
     max_width_metrics = 50  # Maximum width for "Metrics" column
 
-    # Separate GPU and System benchmarks
-    gpu_results = [res for res in results if res.get('category') == 'GPU']
-    system_results = [res for res in results if res.get('category') == 'System']
+    sections = [
+        ("GPU Benchmarks", [res for res in results if res and res.get('category') == 'GPU']),
+        ("System Benchmarks", [res for res in results if res and res.get('category') == 'System']),
+        ("Other Benchmarks", [res for res in results if res and res.get('category') not in {'GPU', 'System'}]),
+    ]
 
-    # Function to process results and append to table data
-    def process_results(result_list, header):
-        table_data.append([header, '', '', '', ''])
-        for result in result_list:
-            if result is None:
-                continue
+    headers = ["Category", "Task", "Input", "Metrics", "Exec Time (s)", "Score"]
+    colalign = ("left", "left", "left", "left", "right", "right")
+
+    rows = []
+    for title, section_results in sections:
+        if not section_results:
+            continue
+
+        first_in_section = True
+        for result in section_results:
             task = result.get('task', 'Unknown Task')
             input_params = result.get('input_params', '')
+            metrics = result.get('metrics', 'N/A')
             score = result.get('score', 'N/A')
             execution_time = result.get('execution_time', 'N/A')
 
-            # Build metric string with relevant metrics
-            metrics = result.get('metrics', 'N/A')
+            wrapped_input = '\n'.join(textwrap.wrap(str(input_params), width=max_width_input)) if input_params else ''
+            wrapped_metric = '\n'.join(textwrap.wrap(str(metrics), width=max_width_metrics)) if metrics else ''
 
-            # Wrap text in "Input" and "Metrics" columns
-            wrapped_input = '\n'.join(textwrap.wrap(input_params, width=max_width_input))
-            wrapped_metric = '\n'.join(textwrap.wrap(metrics, width=max_width_metrics))
-
-            # Format execution time and score
             execution_time_str = f"{float(execution_time):.2f}" if isinstance(execution_time, (int, float)) else 'N/A'
             score_str = f"{float(score):.1f}" if isinstance(score, (int, float)) else 'N/A'
 
-            table_data.append([task, wrapped_input, wrapped_metric, execution_time_str, score_str])
+            category_label = title if first_in_section else ""
+            rows.append([category_label, task, wrapped_input, wrapped_metric, execution_time_str, score_str])
+            first_in_section = False
 
-    # Process GPU and System results
-    process_results(gpu_results, '=== GPU Benchmarks ===')
-    process_results(system_results, '=== System Benchmarks ===')
+    if total_execution_time is not None or total_score is not None:
+        execution_time_str = f"{float(total_execution_time):.2f}" if isinstance(total_execution_time, (int, float)) else 'N/A'
+        score_str = f"{float(total_score):.1f}" if isinstance(total_score, (int, float)) else 'N/A'
+        rows.append([
+            "Summary",
+            "Aggregate Totals",
+            "",
+            "",
+            execution_time_str,
+            score_str,
+        ])
 
-    # Add total score and total execution time
-    total_execution_time_str = f"{float(total_execution_time):.2f}"
-    total_score_str = f"{float(total_score):.1f}"
-    table_data.append(['Total Score / Exec. Time', '', '', total_execution_time_str, total_score_str])
+    _print_section_table(
+        "Benchmark Results",
+        rows,
+        headers,
+        tablefmt='rounded_grid',
+        colalign=colalign,
+        allow_empty=True,
+    )
 
-    headers = ["Task", "Input", "Metrics", "Exec Time (s)", "Score"]
 
-    # Set column alignment
-    colalign = ("left", "left", "left", "right", "right")
+def _format_value(value, unit="", precision=2):
+    if value is None:
+        return "N/A"
+    if isinstance(value, (int, float)):
+        formatted = f"{value:.{precision}f}" if not isinstance(value, int) else str(value)
+    else:
+        formatted = str(value)
+    return f"{formatted} {unit}".strip()
 
-    # Print the table
-    print("\nBenchmark Results:")
-    print(tabulate(table_data, headers=headers, tablefmt="grid", colalign=colalign))
+
+def print_system_overview(system_info, detailed=False):
+    """Pretty-print system overview information."""
+    if not system_info:
+        _print_status("info", "System information unavailable.")
+        return
+
+    if 'error' in system_info:
+        _print_status("error", f"System information error: {system_info['error']}")
+        return
+
+    if 'gpu_warning' in system_info:
+        _print_status("warning", system_info['gpu_warning'])
+
+    if 'nvidia_smi_warning' in system_info:
+        _print_status("warning", system_info['nvidia_smi_warning'])
+
+    system_meta = system_info.get('system', {})
+    environment = system_info.get('environment', {})
+    cpu = system_info.get('cpu', {})
+    memory = system_info.get('memory', {})
+    swap = system_info.get('swap', {})
+    disk = system_info.get('disk', {})
+    gpu_info = system_info.get('gpu_info', [])
+    torch_info = system_info.get('torch', {})
+    disk_partitions = system_info.get('disk_partitions', [])
+    network_interfaces = system_info.get('network_interfaces', [])
+
+    def _fmt(value, unit="", precision=2, skip_zero=False):
+        if value is None:
+            return None
+        if skip_zero and isinstance(value, (int, float)) and value == 0:
+            return None
+        formatted = _format_value(value, unit=unit, precision=precision)
+        return formatted if formatted != 'N/A' else None
+
+    def _lines_to_cell(lines):
+        filtered = [line for line in lines if line]
+        return "\n".join(filtered) if filtered else "N/A"
+
+    def _format_bool(value, true_label="Yes", false_label="No"):
+        if value is None:
+            return "N/A"
+        return true_label if value else false_label
+
+    def _wrap_text(value, width=70):
+        if value is None:
+            return "N/A"
+        if isinstance(value, (int, float, bool)):
+            return str(value)
+        return textwrap.fill(str(value), width=width)
+
+    load_values = []
+    for value in cpu.get('load_average', []) or []:
+        if isinstance(value, (int, float)):
+            load_values.append(f"{value:.2f}")
+        elif value is not None:
+            load_values.append(str(value))
+    load_display = ', '.join(load_values) if load_values else None
+
+    cuda_visible_raw = environment.get('cuda_visible_devices')
+    if cuda_visible_raw:
+        cuda_visible_display = str(cuda_visible_raw)
+    else:
+        cuda_visible_display = 'Not set'
+        if gpu_info:
+            cuda_visible_display = 'Not set (all GPUs visible)'
+
+    summary_rows = []
+
+    system_lines = [
+        f"Host: {system_meta.get('hostname', 'Unknown')}",
+        f"OS: {system_meta.get('os', 'Unknown')}",
+        f"Kernel: {system_meta.get('kernel', 'Unknown')}",
+    ]
+    summary_rows.append(('System', _lines_to_cell(system_lines)))
+
+    uptime_line = None
+    uptime_seconds = system_meta.get('uptime_seconds')
+    if uptime_seconds is not None:
+        uptime_line = f"Uptime: {int(uptime_seconds)} s"
+    timestamp_line = system_meta.get('timestamp_utc')
+    clock_lines = [uptime_line, f"Timestamp: {timestamp_line}" if timestamp_line else None]
+    summary_rows.append(('Clock', _lines_to_cell(clock_lines)))
+
+    cpu_lines = []
+    model = cpu.get('model') or 'Unknown'
+    architecture = cpu.get('architecture')
+    if architecture and architecture != model:
+        cpu_lines.append(f"Model: {model} ({architecture})")
+    else:
+        cpu_lines.append(f"Model: {model}")
+    core_parts = []
+    if cpu.get('physical_cores') is not None:
+        core_parts.append(f"{cpu.get('physical_cores')}P")
+    if cpu.get('logical_cores') is not None:
+        core_parts.append(f"{cpu.get('logical_cores')}L")
+    if core_parts:
+        cpu_lines.append(f"Cores: {' / '.join(core_parts)}")
+    freq_parts = []
+    for label, key in [('cur', 'current_frequency_mhz'), ('min', 'min_frequency_mhz'), ('max', 'max_frequency_mhz')]:
+        freq_str = _fmt(cpu.get(key), unit='MHz', precision=0, skip_zero=True)
+        if freq_str:
+            freq_parts.append(f"{label} {freq_str}")
+    if freq_parts:
+        cpu_lines.append("Freq: " + ', '.join(freq_parts))
+    if load_display:
+        cpu_lines.append(f"Load avg: {load_display}")
+    summary_rows.append(('CPU', _lines_to_cell(cpu_lines)))
+
+    memory_lines = []
+    ram_used = _fmt(memory.get('used_gb'), 'GB')
+    ram_total = _fmt(memory.get('total_gb'), 'GB')
+    if ram_used and ram_total:
+        memory_lines.append(f"RAM: {ram_used} / {ram_total}")
+    elif ram_total:
+        memory_lines.append(f"RAM Total: {ram_total}")
+    elif ram_used:
+        memory_lines.append(f"RAM Used: {ram_used}")
+    ram_available = _fmt(memory.get('available_gb'), 'GB')
+    if ram_available:
+        memory_lines.append(f"Available: {ram_available}")
+    ram_percent = _fmt(memory.get('percent_used'), '%', precision=1)
+    if ram_percent:
+        memory_lines.append(f"Usage: {ram_percent}")
+    swap_used = _fmt(swap.get('used_gb'), 'GB')
+    swap_total = _fmt(swap.get('total_gb'), 'GB')
+    swap_percent = _fmt(swap.get('percent_used'), '%', precision=1)
+    if swap_used and swap_total:
+        memory_lines.append(f"Swap: {swap_used} / {swap_total}")
+    elif swap_total:
+        memory_lines.append(f"Swap Total: {swap_total}")
+    if swap_percent:
+        memory_lines.append(f"Swap Usage: {swap_percent}")
+    summary_rows.append(('Memory', _lines_to_cell(memory_lines)))
+
+    storage_lines = []
+    root_total = _fmt(disk.get('root_total_gb'), 'GB')
+    root_used_percent = _fmt(disk.get('root_used_percent'), '%', precision=1)
+    if root_used_percent and root_total:
+        storage_lines.append(f"Root usage: {root_used_percent} of {root_total}")
+    elif root_used_percent:
+        storage_lines.append(f"Root usage: {root_used_percent}")
+    elif root_total:
+        storage_lines.append(f"Root capacity: {root_total}")
+    partition_count = len(disk_partitions)
+    if partition_count:
+        storage_lines.append(f"Partitions: {partition_count}")
+    summary_rows.append(('Storage', _lines_to_cell(storage_lines)))
+
+    if gpu_info:
+        for gpu in sorted(gpu_info, key=lambda g: g.get('id', 0)):
+            gpu_lines = [
+                f"Name: {gpu.get('name', 'Unknown')}",
+                f"Driver: {gpu.get('driver_version', 'Unknown')}"
+            ]
+            vbios = gpu.get('vbios_version')
+            if vbios:
+                gpu_lines.append(f"VBIOS: {vbios}")
+            mem_used_gpu = _fmt(gpu.get('memory_used_gb'), 'GB')
+            mem_total_gpu = _fmt(gpu.get('total_memory_gb'), 'GB')
+            if mem_used_gpu and mem_total_gpu:
+                gpu_lines.append(f"Memory: {mem_used_gpu} / {mem_total_gpu}")
+            elif mem_total_gpu:
+                gpu_lines.append(f"Memory Total: {mem_total_gpu}")
+            temp_display = _fmt(gpu.get('temperature_c'), '°C')
+            if temp_display:
+                gpu_lines.append(f"Temp: {temp_display}")
+            util_display = _fmt(gpu.get('utilization_percent'), '%', precision=1)
+            if util_display:
+                gpu_lines.append(f"Util: {util_display}")
+            power_draw = _fmt(gpu.get('power_draw_watts'), 'W', precision=1)
+            power_limit = _fmt(gpu.get('power_limit_watts'), 'W', precision=1)
+            if power_draw and power_limit:
+                gpu_lines.append(f"Power: {power_draw} / {power_limit}")
+            elif power_draw:
+                gpu_lines.append(f"Power: {power_draw}")
+            elif power_limit:
+                gpu_lines.append(f"Power Limit: {power_limit}")
+            fan_display = _fmt(gpu.get('fan_speed_percent'), '%', precision=0)
+            if fan_display:
+                gpu_lines.append(f"Fan: {fan_display}")
+            sm_clock = _fmt(gpu.get('sm_clock_mhz'), 'MHz', precision=0)
+            mem_clock = _fmt(gpu.get('memory_clock_mhz'), 'MHz', precision=0)
+            clock_parts = []
+            if sm_clock:
+                clock_parts.append(f"SM {sm_clock}")
+            if mem_clock:
+                clock_parts.append(f"Mem {mem_clock}")
+            if clock_parts:
+                gpu_lines.append("Clocks: " + ' | '.join(clock_parts))
+            summary_rows.append((f"GPU {gpu.get('id', 'N/A')}", _lines_to_cell(gpu_lines)))
+    else:
+        summary_rows.append(('GPU', 'No GPUs detected.'))
+
+    torch_lines = [f"PyTorch: {torch_info.get('version', 'Unknown')}"]
+    if torch_info.get('cuda_version'):
+        torch_lines.append(f"CUDA: {torch_info.get('cuda_version')}")
+    if torch_info.get('cudnn_version'):
+        torch_lines.append(f"cuDNN: {torch_info.get('cudnn_version')}")
+    torch_lines.append(f"CUDA available: {_format_bool(torch_info.get('cuda_available'))}")
+    if torch_info.get('device_count') is not None:
+        torch_lines.append(f"Devices detected: {torch_info.get('device_count')}")
+    summary_rows.append(('PyTorch', _lines_to_cell(torch_lines)))
+
+    env_lines = []
+    python_version = environment.get('python_version')
+    if python_version:
+        env_lines.append(f"Python: {python_version}")
+    python_exec = environment.get('python_executable')
+    if python_exec:
+        env_lines.append(f"Executable: {python_exec}")
+    env_lines.append(f"CUDA_VISIBLE_DEVICES: {cuda_visible_display}")
+    summary_rows.append(('Environment', _lines_to_cell(env_lines)))
+
+    _print_section_table(
+        'System Overview',
+        summary_rows,
+        ['Category', 'Details'],
+        tablefmt='rounded_grid',
+        colalign=('left', 'left'),
+        allow_empty=True,
+    )
+
+    if detailed:
+        partition_rows = []
+        for part in sorted(disk_partitions, key=lambda p: (p.get('mountpoint') or '', p.get('device') or '')):
+            partition_rows.append([
+                part.get('device') or 'Unknown',
+                part.get('mountpoint') or 'Unknown',
+                part.get('fstype') or 'Unknown',
+                _fmt(part.get('total_gb'), 'GB') or 'N/A',
+                _fmt(part.get('used_percent'), '%', precision=1) or 'N/A',
+            ])
+        _print_section_table(
+            'Disk Partitions',
+            partition_rows,
+            ['Device', 'Mount', 'FS', 'Total (GB)', 'Used %'],
+            tablefmt='rounded_grid',
+            colalign=('left', 'left', 'left', 'right', 'right'),
+        )
+
+        cpu_stats_rows = []
+        for label, key in [
+            ('Context Switches', 'context_switches'),
+            ('Interrupts', 'interrupts'),
+            ('Soft Interrupts', 'soft_interrupts'),
+            ('System Calls', 'syscalls'),
+        ]:
+            stat_value = cpu.get(key)
+            if stat_value is not None:
+                cpu_stats_rows.append([label, stat_value])
+        _print_section_table(
+            'CPU Scheduler Stats',
+            cpu_stats_rows,
+            ['Metric', 'Value'],
+            tablefmt='rounded_grid',
+            colalign=('left', 'right'),
+        )
+
+        torch_devices = torch_info.get('devices', [])
+        device_rows = []
+        for device in torch_devices:
+            device_rows.append([
+                device.get('logical_id'),
+                device.get('name', 'Unknown'),
+                _fmt(device.get('total_memory_gb'), 'GB') or 'N/A',
+                device.get('compute_capability') or 'Unknown',
+                device.get('multi_processor_count'),
+                device.get('max_threads_per_block'),
+            ])
+        _print_section_table(
+            'CUDA Device Properties (PyTorch view)',
+            device_rows,
+            ['Logical ID', 'Name', 'Total Mem (GB)', 'Compute Capability', 'SMs', 'Max Threads/Block'],
+            colalign=('right', 'left', 'right', 'left', 'right', 'right'),
+        )
+
+        gpu_rows = []
+        for gpu in sorted(gpu_info, key=lambda g: g.get('id', 0)):
+            name_display = _wrap_text(gpu.get('name', 'Unknown'), width=24)
+
+            driver_lines = [f"Driver {gpu.get('driver_version', 'Unknown')}"]
+            vbios = gpu.get('vbios_version')
+            if vbios:
+                driver_lines.append(f"VBIOS {vbios}")
+            driver_info = _lines_to_cell(driver_lines)
+
+            mem_used_gpu = _fmt(gpu.get('memory_used_gb'), 'GB')
+            mem_total_gpu = _fmt(gpu.get('total_memory_gb'), 'GB')
+            memory_lines = []
+            if mem_used_gpu and mem_total_gpu:
+                memory_lines.append(f"Used {mem_used_gpu}")
+                memory_lines.append(f"Total {mem_total_gpu}")
+            elif mem_total_gpu:
+                memory_lines.append(f"Total {mem_total_gpu}")
+            elif mem_used_gpu:
+                memory_lines.append(f"Used {mem_used_gpu}")
+            memory_info = _lines_to_cell(memory_lines)
+
+            thermal_lines = []
+            temp_display = _fmt(gpu.get('temperature_c'), '°C')
+            if temp_display:
+                thermal_lines.append(f"Temp {temp_display}")
+            util_display = _fmt(gpu.get('utilization_percent'), '%', precision=1)
+            if util_display:
+                thermal_lines.append(f"Util {util_display}")
+            fan_display = _fmt(gpu.get('fan_speed_percent'), '%', precision=0)
+            if fan_display:
+                thermal_lines.append(f"Fan {fan_display}")
+            thermal_info = _lines_to_cell(thermal_lines)
+
+            power_lines = []
+            power_draw = _fmt(gpu.get('power_draw_watts'), 'W', precision=1)
+            power_limit = _fmt(gpu.get('power_limit_watts'), 'W', precision=1)
+            if power_draw:
+                power_lines.append(f"Draw {power_draw}")
+            if power_limit:
+                power_lines.append(f"Limit {power_limit}")
+            power_info = _lines_to_cell(power_lines)
+
+            clock_lines = []
+            sm_clock = _fmt(gpu.get('sm_clock_mhz'), 'MHz', precision=0)
+            if sm_clock:
+                clock_lines.append(f"SM {sm_clock}")
+            mem_clock = _fmt(gpu.get('memory_clock_mhz'), 'MHz', precision=0)
+            if mem_clock:
+                clock_lines.append(f"Mem {mem_clock}")
+            clock_info = _lines_to_cell(clock_lines)
+
+            gpu_rows.append([
+                gpu.get('id', 'N/A'),
+                name_display,
+                driver_info,
+                memory_info,
+                thermal_info,
+                power_info,
+                clock_info,
+            ])
+
+        _print_section_table(
+            'GPU Telemetry (nvidia-smi view)',
+            gpu_rows,
+            ['ID', 'Name', 'Driver / Firmware', 'Memory', 'Thermals / Utilization', 'Power', 'Clocks'],
+            colalign=('right', 'left', 'left', 'left', 'left', 'left', 'left'),
+        )
+
+        firmware_rows = []
+        for gpu in sorted(gpu_info, key=lambda g: g.get('id', 0)):
+            vbios = gpu.get('vbios_version')
+            if vbios:
+                firmware_rows.append([gpu.get('id', 'N/A'), vbios])
+        _print_section_table(
+            'GPU Firmware',
+            firmware_rows,
+            ['GPU ID', 'VBIOS Version'],
+            colalign=('right', 'left'),
+        )
+
+        network_rows = []
+        for nic in sorted(network_interfaces, key=lambda n: n.get('interface') or n.get('name') or ''):
+            interface_name = nic.get('interface') or nic.get('name') or 'Unknown'
+            network_rows.append([
+                interface_name,
+                _format_bool(nic.get('is_up')),  # Up status
+                _fmt(nic.get('speed_mbps'), 'Mbps', precision=0) or 'N/A',
+                nic.get('mtu', 'N/A')
+            ])
+        _print_section_table(
+            'Network Interfaces',
+            network_rows,
+            ['Interface', 'Up', 'Speed', 'MTU'],
+            colalign=('left', 'center', 'right', 'right'),
+        )
+
+        env_rows = []
+        display_environment = dict(environment)
+        display_environment['cuda_visible_devices'] = cuda_visible_display
+        for key, value in sorted(display_environment.items()):
+            env_rows.append([key.replace('_', ' ').title(), _wrap_text(value)])
+        _print_section_table(
+            'Environment',
+            env_rows,
+            ['Variable', 'Value'],
+            colalign=('left', 'left'),
+        )
 
 # Argument Parsing
 def parse_arguments():
@@ -1614,7 +2277,7 @@ def benchmark_inference_performance_multi_gpu(model_name, model_size, batch_size
         # Aggregate results
         valid_results = [v for v in return_dict.values() if v is not None]
         if not valid_results:
-            print("No valid inference results collected.")
+            _print_status("warning", "No valid inference results collected.")
             return None
 
         total_throughput = sum([v['throughput'] for v in valid_results])
@@ -1651,36 +2314,40 @@ def main():
     set_default_tensor_type(args.precision)
     dtype = get_torch_dtype_from_precision(args.precision)
 
-    # Validate and set CUDA_VISIBLE_DEVICES
+    # Validate requested GPUs and manage CUDA visibility without clobbering the user's environment.
+    original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     requested_gpu_ids = None
     if args.gpus is not None:
         requested_gpu_ids = [int(id.strip()) for id in args.gpus.split(',') if id.strip()]
 
     physical_gpu_ids, _, status_message = resolve_requested_gpus(requested_gpu_ids)
-
     physical_gpu_id_list = sorted(set(physical_gpu_ids))
+
     if physical_gpu_id_list:
-        visible_devices = ','.join(map(str, physical_gpu_id_list))
-        os.environ["CUDA_VISIBLE_DEVICES"] = visible_devices
-        if args.gpus is not None:
-            print(f"Using GPUs: {visible_devices}")
-        else:
-            print(f"Using all available GPUs: {visible_devices}")
         gpu_available = True
-        physical_to_logical = map_physical_to_logical_gpu_ids(physical_gpu_id_list)
-        logical_gpu_ids = [physical_to_logical[physical_id] for physical_id in physical_gpu_id_list]
+        visible_devices = ','.join(map(str, physical_gpu_id_list))
+        if args.gpus is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = visible_devices
+            _print_status("gpu", f"Using GPU IDs {visible_devices}")
+        else:
+            if original_cuda_visible:
+                _print_status(
+                    "gpu",
+                    f"CUDA_VISIBLE_DEVICES preset to {original_cuda_visible}; detected GPU IDs {visible_devices}",
+                )
+            else:
+                _print_status("gpu", f"Detected GPU IDs {visible_devices}")
     else:
-        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        if args.gpus is not None:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         warning_message = status_message
         if not warning_message:
             if args.gpus is not None:
                 warning_message = "No valid GPUs specified."
             else:
                 warning_message = "No GPUs detected."
-        print(f"Warning: {warning_message} GPU benchmarks will be skipped.")
+        _print_status("warning", f"{warning_message} GPU benchmarks will be skipped.")
         gpu_available = False
-        physical_to_logical = {}
-        logical_gpu_ids = []
 
     # Determine which benchmarks to run
     benchmarks_specified = any([
@@ -1777,11 +2444,11 @@ def main():
         if gpu_available:
             log_process = start_gpu_logging(args.gpu_log_file, args.gpu_log_metrics)
             if log_process:
-                print(f"GPU logging started, writing to {args.gpu_log_file}")
+                _print_status("log", f"GPU logging started → {args.gpu_log_file}")
             else:
-                print("Failed to start GPU logging.")
+                _print_status("warning", "Failed to start GPU logging.")
         else:
-            print("GPU logging requested but no GPUs are available; skipping GPU logging.")
+            _print_status("warning", "GPU logging requested but no GPUs are available; skipping GPU logging.")
 
     # Reference Metrics (adjusted as needed)
     # 2024-09-26 1/4 of dual a16 / 12 vCore / 128G RAM / 700G NVMe
@@ -1810,12 +2477,12 @@ def main():
     # Run benchmarks
     all_results = []
     for iteration in range(args.num_iterations):
-        print(f"\n=== Iteration {iteration + 1}/{args.num_iterations} ===")
+        _print_status("iteration", f"{iteration + 1}/{args.num_iterations}", newline_before=True)
         results = []
 
         if run_gpu_data_gen:
             if gpu_available:
-                print("Running GPU Data Generation benchmark...")
+                _print_status("run", "GPU Data Generation benchmark")
                 result = benchmark_gpu_data_generation(
                     args.gpu_data_size_gb,
                     reference_metrics,
@@ -1824,11 +2491,11 @@ def main():
                 )
                 results.append(result)
             else:
-                print("Skipping GPU Data Generation benchmark: no GPUs detected.")
+                _print_status("skip", "GPU Data Generation benchmark: no GPUs detected.")
 
         if run_gpu_to_cpu_transfer:
             if gpu_available:
-                print("Running GPU to CPU Transfer benchmark...")
+                _print_status("run", "GPU to CPU Transfer benchmark")
                 result = benchmark_gpu_to_cpu_transfer(
                     args.gpu_data_size_gb,
                     reference_metrics,
@@ -1837,11 +2504,11 @@ def main():
                 )
                 results.append(result)
             else:
-                print("Skipping GPU to CPU Transfer benchmark: no GPUs detected.")
+                _print_status("skip", "GPU to CPU Transfer benchmark: no GPUs detected.")
 
         if run_gpu_to_gpu_transfer:
             if gpu_available:
-                print("Running GPU to GPU Transfer benchmark...")
+                _print_status("run", "GPU to GPU Transfer benchmark")
                 result = benchmark_gpu_to_gpu_transfer(
                     args.gpu_data_size_gb,
                     reference_metrics,
@@ -1850,11 +2517,11 @@ def main():
                 )
                 results.append(result)
             else:
-                print("Skipping GPU to GPU Transfer benchmark: no GPUs detected.")
+                _print_status("skip", "GPU to GPU Transfer benchmark: no GPUs detected.")
 
         if run_gpu_tensor:
             if gpu_available:
-                print("Running GPU Tensor Core Performance benchmark...")
+                _print_status("run", "GPU Tensor Core Performance benchmark")
                 tensor_core_result = benchmark_gpu_tensor_cores(
                     matrix_size=args.gpu_tensor_matrix_size,
                     num_iterations=args.gpu_tensor_iterations,
@@ -1863,11 +2530,11 @@ def main():
                 )
                 results.append(tensor_core_result)
             else:
-                print("Skipping GPU Tensor Core Performance benchmark: no GPUs detected.")
+                _print_status("skip", "GPU Tensor Core Performance benchmark: no GPUs detected.")
 
         if run_gpu_compute:
             if gpu_available:
-                print("Running GPU Computational Task benchmark...")
+                _print_status("run", "GPU Computational Task benchmark")
                 computational_result = benchmark_gpu_computational_task(
                     epochs=args.gpu_comp_epochs,
                     batch_size=args.gpu_comp_batch_size,
@@ -1880,11 +2547,11 @@ def main():
                 )
                 results.append(computational_result)
             else:
-                print("Skipping GPU Computational Task benchmark: no GPUs detected.")
+                _print_status("skip", "GPU Computational Task benchmark: no GPUs detected.")
 
         if run_gpu_inference:
             if gpu_available:
-                print("Running GPU Inference Performance benchmark...")
+                _print_status("run", "GPU Inference Performance benchmark")
                 inference_result = benchmark_inference_performance_multi_gpu(
                     model_name=args.gpu_inference_model,
                     model_size=args.model_size,
@@ -1898,11 +2565,11 @@ def main():
                 )
                 results.append(inference_result)
             else:
-                print("Skipping GPU Inference Performance benchmark: no GPUs detected.")
+                _print_status("skip", "GPU Inference Performance benchmark: no GPUs detected.")
 
         if run_gpu_memory_bandwidth:
             if gpu_available:
-                print("Running GPU Memory Bandwidth benchmark...")
+                _print_status("run", "GPU Memory Bandwidth benchmark")
                 gpu_mem_bw_result = benchmark_gpu_memory_bandwidth(
                     data_size_gb=args.gpu_memory_size_gb,
                     reference_metrics=reference_metrics,
@@ -1910,31 +2577,31 @@ def main():
                 )
                 results.append(gpu_mem_bw_result)
             else:
-                print("Skipping GPU Memory Bandwidth benchmark: no GPUs detected.")
+                _print_status("skip", "GPU Memory Bandwidth benchmark: no GPUs detected.")
 
         if run_cpu_single_thread:
-            print("Running CPU Single-threaded Performance benchmark...")
+            _print_status("run", "CPU Single-threaded Performance benchmark")
             cpu_single_thread_result = benchmark_cpu_single_thread(reference_metrics)
             results.append(cpu_single_thread_result)
 
         if run_cpu_multi_thread:
-            print("Running CPU Multi-threaded Performance benchmark...")
+            _print_status("run", "CPU Multi-threaded Performance benchmark")
             cpu_multi_thread_result = benchmark_cpu_multi_thread(reference_metrics, args.cpu_num_threads)
             results.append(cpu_multi_thread_result)
 
         if run_memory_bandwidth:
-            print("Running Memory Bandwidth benchmark...")
+            _print_status("run", "Memory Bandwidth benchmark")
             memory_bandwidth_result = benchmark_memory_bandwidth(args.memory_size_mb_cpu, reference_metrics)
             results.append(memory_bandwidth_result)
 
         if run_cpu_to_disk_write:
-            print("Running CPU to Disk Write benchmark...")
+            _print_status("run", "CPU to Disk Write benchmark")
             output_file = f'benchmark_output_{iteration}.bin'
             result = benchmark_cpu_to_disk_write(output_file, args.data_size_gb_cpu, reference_metrics)
             results.append(result)
 
         if run_disk_io:
-            print("Running Disk I/O Performance benchmark...")
+            _print_status("run", "Disk I/O Performance benchmark")
             disk_file_path = f'disk_io_test_file_{iteration}.dat'
             disk_result = benchmark_disk_io(
                 file_path=disk_file_path,
@@ -1951,7 +2618,7 @@ def main():
     # Stop GPU logging if it was started
     if args.log_gpu:
         stop_gpu_logging(log_process)
-        print("GPU logging stopped.")
+        _print_status("log", "GPU logging stopped.")
 
     # End total execution timer
     total_end_time = time.time()
@@ -1968,25 +2635,8 @@ def main():
     print_results_table(all_results, total_score, total_execution_time)
 
     # System Information and Execution Time
-    if args.detailed_output:
-        print("\n=== System Information ===")
-        if 'error' in system_info:
-            print(f"System Information Error: {system_info['error']}")
-        else:
-            print(f"CPU Model: {system_info['cpu_info']['cpu_model']}")
-            print(f"CPU Cores: {system_info['cpu_info']['cpu_cores']}")
-            print(f"CPU Threads: {system_info['cpu_info']['cpu_threads']}")
-            print(f"Total RAM (GB): {system_info['ram_info']['total_ram_gb']}")
-            print(f"Total Disk (GB): {system_info['disk_info']['total_disk_gb']}")
-
-            for gpu in system_info['gpu_info']:
-                print(f"GPU {gpu['id']}:")
-                print(f"  Name: {gpu['name']}")
-                print(f"  Total Memory (GB): {gpu['total_memory_gb']}")
-                print(f"  Driver Version: {gpu['driver_version']}")
-                print(f"  CUDA Version: {gpu['cuda_version']}")
-
-        print(f"\nTotal Execution Time: {total_execution_time:.2f} seconds")
+    print_system_overview(system_info, detailed=args.detailed_output)
+    _print_status("summary", f"Total execution time {total_execution_time:.2f} s", newline_before=True)
 
     if args.json:
         # Prepare output data
@@ -1999,7 +2649,7 @@ def main():
         }
         # Output results as JSON
         json_output = json.dumps(output_data, indent=4)
-        print("\nJSON Output:")
+        _print_heading("JSON Output")
         print(json_output)
 
 if __name__ == "__main__":
