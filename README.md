@@ -16,6 +16,7 @@ Built as a flexible benchmarking suite, GPUBench tests the performance of key ha
 - **CPU Performance**: Evaluate both single-threaded and multi-threaded CPU performance.
 - **Memory Bandwidth**: Measure system memory performance.
 - **Tensor Core Performance**: Benchmark GPU Tensor Core capabilities.
+- **System Overview Snapshot**: Capture OS, CPU, GPU telemetry, storage, and environment metadata for reproducible benchmarking.
 
 ## Requirements and Setup
 
@@ -73,7 +74,7 @@ The following Python libraries are required:
 
 ### General Options:
 - `--json`: Output results in JSON format.
-- `--detailed-output`: Show detailed benchmark results.
+- `--detailed-output`: Show detailed benchmark results and print an expanded system overview (disk partitions, network links, environment variables).
 - `--num-iterations N`: Number of times to run the benchmarks (default: 1).
 - `--log-gpu`: Enable GPU logging during benchmarks.
 - `--gpu-log-file FILE`: Specify GPU log file name (default: 'gpu_log.csv').
@@ -194,6 +195,21 @@ Benchmark Results:
 | Total Score / Exec. Time        |                                |                                                   |          282.03 |  3783.7 |
 +---------------------------------+--------------------------------+---------------------------------------------------+-----------------+---------+
 ```
+
+### System Overview Output
+
+After the benchmark table, GPUBench prints a consolidated system summary that now captures:
+
+- Hostname, operating system, kernel, uptime, and timestamp (UTC) for reproducibility.
+- CPU architecture, physical/logical cores, frequency range, and load averages.
+- Memory and swap utilisation, root disk usage, and (with `--detailed-output`) a breakdown of every mounted partition.
+- GPU inventory with live telemetry from `nvidia-smi` when available (temperature, power draw/limits, SM & memory clocks, fan speeds, utilisation, and memory use).
+- GPU driver and firmware (VBIOS) details plus per-device PyTorch properties (logical ID mapping, compute capability, SM count, thread limits).
+- PyTorch runtime metadata (CUDA/cuDNN versions) alongside captured environment variables such as `CUDA_VISIBLE_DEVICES`.
+- Optional network interface status (link state, speed, MTU) when `--detailed-output` is supplied.
+- CPU scheduler counters (context switches, interrupts, syscalls) to aid in diagnosing contention-heavy runs.
+
+This enhanced inventory helps share benchmark results with complete hardware and software context, enabling easier cross-environment comparisons and troubleshooting.
 
 ## License
 
