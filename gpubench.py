@@ -24,6 +24,7 @@ import sys
 import time
 import json
 import argparse
+import tempfile
 import platform
 import subprocess
 import logging
@@ -107,6 +108,14 @@ def check_python_package(module_name):
         return True
     except ImportError:
         return False
+
+
+def create_temp_benchmark_file(directory, prefix, suffix):
+    """Create a temporary file for benchmarks in the target directory."""
+    temp_file = tempfile.NamedTemporaryFile(prefix=prefix, suffix=suffix, delete=False, dir=directory)
+    temp_path = temp_file.name
+    temp_file.close()
+    return temp_path
 
 
 def check_cuda_toolkit(torch_module):
@@ -1095,6 +1104,8 @@ def parse_arguments():
                             help='IO depth for disk I/O benchmark (default: 16)')
     disk_group.add_argument('--disk-num-jobs', type=int, default=8,
                             help='Number of concurrent jobs for disk I/O benchmark (default: 8)')
+    disk_group.add_argument('--disk-path', type=str, default='.',
+                            help='Directory to use for disk benchmarks (default: current working directory)')
 
     return parser.parse_args()
 
@@ -1169,12 +1180,20 @@ def benchmark_cpu_to_disk_write(file_path, data_size_gb, reference_metrics):
 
         # Optionally, remove the file after benchmarking
         if os.path.exists(file_path):
-            os.remove(file_path)
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
 
         return result
 
     except Exception as e:
         print(f"Error during CPU to Disk Write benchmarking: {e}")
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
         return None
 
 def benchmark_cpu_single_thread(reference_metrics):
@@ -1489,15 +1508,17 @@ def benchmark_disk_io(file_path, data_size_gb, block_size_kb, io_depth, num_jobs
         # Average the scores
         result['score'] = (seq_read_throughput_score + seq_write_throughput_score + rand_read_iops_score + rand_write_iops_score) / 4
 
-        # Cleanup
-        if os.path.exists(file_path):
-            os.remove(file_path)
-
         return result
 
     except Exception as e:
         print(f"Error during disk I/O benchmarking: {e}")
         return None
+    finally:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
 
 # GPU Benchmark Functions
 
@@ -2310,6 +2331,17 @@ def main():
     configure_logging()
     args = parse_arguments()
 
+    disk_target_dir = os.path.abspath(args.disk_path)
+    try:
+        os.makedirs(disk_target_dir, exist_ok=True)
+    except OSError as exc:
+        _print_status("error", f"Unable to prepare disk benchmark directory '{disk_target_dir}': {exc}")
+        return
+    if not os.path.isdir(disk_target_dir):
+        _print_status("error", f"Disk benchmark path '{disk_target_dir}' is not a directory.")
+        return
+    args.disk_path = disk_target_dir
+
     # Set the default tensor type based on precision
     set_default_tensor_type(args.precision)
     dtype = get_torch_dtype_from_precision(args.precision)
@@ -2596,22 +2628,32 @@ def main():
 
         if run_cpu_to_disk_write:
             _print_status("run", "CPU to Disk Write benchmark")
-            output_file = f'benchmark_output_{iteration}.bin'
-            result = benchmark_cpu_to_disk_write(output_file, args.data_size_gb_cpu, reference_metrics)
-            results.append(result)
+            try:
+                output_file = create_temp_benchmark_file(args.disk_path, 'benchmark_output_', '.bin')
+            except OSError as exc:
+                _print_status("error", f"Failed to create temporary file for CPU to Disk Write benchmark: {exc}")
+                results.append(None)
+            else:
+                result = benchmark_cpu_to_disk_write(output_file, args.data_size_gb_cpu, reference_metrics)
+                results.append(result)
 
         if run_disk_io:
             _print_status("run", "Disk I/O Performance benchmark")
-            disk_file_path = f'disk_io_test_file_{iteration}.dat'
-            disk_result = benchmark_disk_io(
-                file_path=disk_file_path,
-                data_size_gb=args.disk_data_size,
-                block_size_kb=args.disk_block_size,
-                io_depth=args.disk_io_depth,
-                num_jobs=args.disk_num_jobs,
-                reference_metrics=reference_metrics
-            )
-            results.append(disk_result)
+            try:
+                disk_file_path = create_temp_benchmark_file(args.disk_path, 'disk_io_test_', '.dat')
+            except OSError as exc:
+                _print_status("error", f"Failed to create temporary file for Disk I/O benchmark: {exc}")
+                results.append(None)
+            else:
+                disk_result = benchmark_disk_io(
+                    file_path=disk_file_path,
+                    data_size_gb=args.disk_data_size,
+                    block_size_kb=args.disk_block_size,
+                    io_depth=args.disk_io_depth,
+                    num_jobs=args.disk_num_jobs,
+                    reference_metrics=reference_metrics
+                )
+                results.append(disk_result)
 
         all_results.extend(results)
 

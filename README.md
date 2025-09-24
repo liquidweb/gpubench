@@ -114,6 +114,7 @@ The following Python libraries are required:
 - `--disk-block-size N`: Block size in KB for disk I/O benchmark (default: 4).
 - `--disk-io-depth N`: IO depth for disk I/O benchmark (default: 16).
 - `--disk-num-jobs N`: Number of concurrent jobs for disk I/O benchmark (default: 8).
+- `--disk-path PATH`: Directory to use for disk benchmarks (default: current working directory).
 
 ### Inference Benchmarks:
 - `--gpu-inference`: Run GPU Inference Performance benchmark.
