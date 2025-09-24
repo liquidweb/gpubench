@@ -26,6 +26,7 @@ import json
 import argparse
 import platform
 import subprocess
+import logging
 import textwrap
 import threading
 import hashlib
@@ -38,6 +39,36 @@ import torch.nn as nn
 import torch.optim as optim
 from tabulate import tabulate
 import multiprocessing as mp
+
+
+logger = logging.getLogger(__name__)
+
+
+def safe_get_gpus(context):
+    """Safely retrieve GPU information, logging friendly warnings on failure."""
+    try:
+        return GPUtil.getGPUs(), None
+    except Exception as exc:
+        gpu_not_found_error = getattr(GPUtil, 'GPUNotFound', None)
+        gpu_query_error = getattr(GPUtil, 'GPUQueryError', None)
+        gputil_general_error = getattr(GPUtil, 'GPUtilError', None)
+
+        if gpu_not_found_error and isinstance(exc, gpu_not_found_error):
+            message = ("No GPUs were detected while {}. GPU-specific functionality "
+                       "will be skipped.").format(context)
+        elif ((gpu_query_error and isinstance(exc, gpu_query_error)) or
+              (gputil_general_error and isinstance(exc, gputil_general_error))):
+            message = ("GPUtil could not query GPUs while {}: {}. GPU-specific "
+                       "functionality will be skipped.".format(context, exc))
+        elif isinstance(exc, (subprocess.SubprocessError, FileNotFoundError, OSError)):
+            message = ("Failed to execute GPU query while {}: {}. Ensure NVIDIA drivers "
+                       "and `nvidia-smi` are installed.".format(context, exc))
+        else:
+            message = ("Unexpected error while {}: {}. GPU-specific functionality will "
+                       "be skipped.".format(context, exc))
+
+        logger.warning(message)
+        return [], message
 
 # Set default tensor type based on precision
 def set_default_tensor_type(precision):
@@ -79,7 +110,7 @@ def get_system_info():
     }
 
     # GPU Information
-    gpus = GPUtil.getGPUs()
+    gpus, _ = safe_get_gpus("collecting system information")
     gpu_info_list = []
     for gpu in gpus:
         gpu_info = {
@@ -700,14 +731,15 @@ def benchmark_disk_io(file_path, data_size_gb, block_size_kb, io_depth, num_jobs
 # GPU Benchmark Functions
 
 def validate_gpu_ids(gpu_ids):
-    available_gpus = [gpu.id for gpu in GPUtil.getGPUs()]
+    available_gpus, warning_message = safe_get_gpus("validating requested GPU IDs")
+    available_gpu_ids = [gpu.id for gpu in available_gpus]
     valid_gpu_ids = []
     for gpu_id in gpu_ids:
-        if gpu_id in available_gpus:
+        if gpu_id in available_gpu_ids:
             valid_gpu_ids.append(gpu_id)
         else:
             print(f"Warning: GPU ID {gpu_id} is not available. It will be skipped.")
-    return valid_gpu_ids
+    return valid_gpu_ids, warning_message
 
 def map_physical_to_logical_gpu_ids(gpu_ids):
     """
@@ -722,22 +754,24 @@ def resolve_requested_gpus(requested_ids):
     """Resolve requested GPU IDs into physical IDs and logical ID mapping."""
     if requested_ids is None:
         if torch.cuda.is_available():
-            physical_gpu_ids = [gpu.id for gpu in GPUtil.getGPUs()]
+            available_gpus, gpu_query_message = safe_get_gpus("resolving requested GPUs")
+            physical_gpu_ids = [gpu.id for gpu in available_gpus]
         else:
             physical_gpu_ids = []
+            gpu_query_message = None
     else:
-        physical_gpu_ids = validate_gpu_ids(requested_ids)
+        physical_gpu_ids, gpu_query_message = validate_gpu_ids(requested_ids)
 
     physical_to_logical = map_physical_to_logical_gpu_ids(physical_gpu_ids)
 
-    status_message = None
+    status_message = gpu_query_message
     if not physical_gpu_ids:
-        if requested_ids is None:
+        if status_message is None and requested_ids is None:
             if torch.cuda.is_available():
                 status_message = "No GPUs detected."
             else:
                 status_message = "CUDA is not available. No GPUs detected."
-        else:
+        elif status_message is None:
             status_message = f"No valid GPUs available from requested IDs: {requested_ids}."
 
     return physical_gpu_ids, physical_to_logical, status_message
