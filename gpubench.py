@@ -718,6 +718,30 @@ def map_physical_to_logical_gpu_ids(gpu_ids):
         physical_to_logical[physical_id] = logical_id
     return physical_to_logical
 
+def resolve_requested_gpus(requested_ids):
+    """Resolve requested GPU IDs into physical IDs and logical ID mapping."""
+    if requested_ids is None:
+        if torch.cuda.is_available():
+            physical_gpu_ids = [gpu.id for gpu in GPUtil.getGPUs()]
+        else:
+            physical_gpu_ids = []
+    else:
+        physical_gpu_ids = validate_gpu_ids(requested_ids)
+
+    physical_to_logical = map_physical_to_logical_gpu_ids(physical_gpu_ids)
+
+    status_message = None
+    if not physical_gpu_ids:
+        if requested_ids is None:
+            if torch.cuda.is_available():
+                status_message = "No GPUs detected."
+            else:
+                status_message = "CUDA is not available. No GPUs detected."
+        else:
+            status_message = f"No valid GPUs available from requested IDs: {requested_ids}."
+
+    return physical_gpu_ids, physical_to_logical, status_message
+
 def get_torch_dtype_from_precision(precision):
     if precision == 'fp16':
         return torch.float16
@@ -803,22 +827,16 @@ def benchmark_gpu_data_generation(data_size_gb, reference_metrics, precision, ph
     try:
         dtype = get_torch_dtype_from_precision(precision)
 
-        if physical_gpu_ids is None:
-            if torch.cuda.is_available():
-                physical_gpu_ids = [gpu.id for gpu in GPUtil.getGPUs()]
-            else:
-                physical_gpu_ids = []
-        else:
-            physical_gpu_ids = validate_gpu_ids(physical_gpu_ids)
+        physical_gpu_ids, physical_to_logical, status_message = resolve_requested_gpus(physical_gpu_ids)
 
         num_gpus = len(physical_gpu_ids)
         if num_gpus == 0:
-            print("No valid GPUs available for GPU Data Generation benchmark.")
+            message = status_message or "No valid GPUs available."
+            print(f"{message} Cannot run GPU Data Generation benchmark.")
             return None
 
         # Map physical GPU IDs to logical IDs
-        physical_to_logical = map_physical_to_logical_gpu_ids(physical_gpu_ids)
-        logical_gpu_ids = list(range(num_gpus))
+        logical_gpu_ids = [physical_to_logical[physical_id] for physical_id in physical_gpu_ids]
 
         print(f"Using GPUs: {physical_gpu_ids} (logical IDs: {logical_gpu_ids}) for GPU Data Generation")
 
@@ -891,22 +909,16 @@ def benchmark_gpu_to_cpu_transfer(data_size_gb, reference_metrics, precision, ph
     try:
         dtype = get_torch_dtype_from_precision(precision)
 
-        if physical_gpu_ids is None:
-            if torch.cuda.is_available():
-                physical_gpu_ids = [gpu.id for gpu in GPUtil.getGPUs()]
-            else:
-                physical_gpu_ids = []
-        else:
-            physical_gpu_ids = validate_gpu_ids(physical_gpu_ids)
+        physical_gpu_ids, physical_to_logical, status_message = resolve_requested_gpus(physical_gpu_ids)
 
         num_gpus = len(physical_gpu_ids)
         if num_gpus == 0:
-            print("No valid GPUs available for GPU to CPU Transfer benchmark.")
+            message = status_message or "No valid GPUs available."
+            print(f"{message} Cannot run GPU to CPU Transfer benchmark.")
             return None
 
         # Map physical GPU IDs to logical IDs
-        physical_to_logical = map_physical_to_logical_gpu_ids(physical_gpu_ids)
-        logical_gpu_ids = list(range(num_gpus))
+        logical_gpu_ids = [physical_to_logical[physical_id] for physical_id in physical_gpu_ids]
 
         print(f"Using GPUs: {physical_gpu_ids} (logical IDs: {logical_gpu_ids}) for GPU to CPU Transfer")
 
@@ -964,14 +976,17 @@ def benchmark_gpu_to_gpu_transfer(data_size_gb, reference_metrics, precision, ph
     try:
         dtype = get_torch_dtype_from_precision(precision)
 
-        if physical_gpu_ids is None:
-            physical_gpu_ids = [gpu.id for gpu in GPUtil.getGPUs()]
-        else:
-            physical_gpu_ids = validate_gpu_ids(physical_gpu_ids)
+        physical_gpu_ids, physical_to_logical, status_message = resolve_requested_gpus(physical_gpu_ids)
+
+        num_gpus = len(physical_gpu_ids)
 
         # Ensure at least two GPUs are available
-        if len(physical_gpu_ids) < 2:
-            print("At least two GPUs are required for GPU to GPU Transfer benchmark.")
+        if num_gpus < 2:
+            if num_gpus == 0:
+                message = status_message or "No valid GPUs available."
+                print(f"{message} GPU to GPU Transfer benchmark requires at least two GPUs.")
+            else:
+                print("At least two GPUs are required for GPU to GPU Transfer benchmark.")
             return {
                 'task': 'GPU to GPU Transfer',
                 'category': 'GPU',
@@ -984,8 +999,6 @@ def benchmark_gpu_to_gpu_transfer(data_size_gb, reference_metrics, precision, ph
             }
 
         # Map physical GPU IDs to logical IDs
-        physical_to_logical = map_physical_to_logical_gpu_ids(physical_gpu_ids)
-
         physical_gpu0_id, physical_gpu1_id = physical_gpu_ids[:2]
         logical_gpu0_id = physical_to_logical[physical_gpu0_id]
         logical_gpu1_id = physical_to_logical[physical_gpu1_id]
@@ -1179,22 +1192,16 @@ def benchmark_gpu_computational_task(epochs, batch_size, input_size, hidden_size
     try:
         dtype = get_torch_dtype_from_precision(precision)
 
-        if physical_gpu_ids is None:
-            if torch.cuda.is_available():
-                physical_gpu_ids = [gpu.id for gpu in GPUtil.getGPUs()]
-            else:
-                physical_gpu_ids = []
-        else:
-            physical_gpu_ids = validate_gpu_ids(physical_gpu_ids)
+        physical_gpu_ids, physical_to_logical, status_message = resolve_requested_gpus(physical_gpu_ids)
 
         num_gpus = len(physical_gpu_ids)
         if num_gpus == 0:
-            print("No valid GPUs available for GPU Computational Task benchmark.")
+            message = status_message or "No valid GPUs available."
+            print(f"{message} Cannot run GPU Computational Task benchmark.")
             return None
 
         # Map physical GPU IDs to logical IDs
-        physical_to_logical = map_physical_to_logical_gpu_ids(physical_gpu_ids)
-        logical_gpu_ids = list(range(num_gpus))
+        logical_gpu_ids = [physical_to_logical[physical_id] for physical_id in physical_gpu_ids]
 
         device = torch.device(f'cuda:{logical_gpu_ids[0]}')
 
@@ -1371,20 +1378,18 @@ def benchmark_inference_performance_multi_gpu(model_name, model_size, batch_size
     try:
         dtype = get_torch_dtype_from_precision(precision)
 
-        if physical_gpu_ids is None:
-            # Get available GPU IDs
-            physical_gpu_ids = [gpu.id for gpu in GPUtil.getGPUs()]
-        else:
-            physical_gpu_ids = validate_gpu_ids(physical_gpu_ids)
+        physical_gpu_ids, physical_to_logical, status_message = resolve_requested_gpus(physical_gpu_ids)
 
         num_gpus = len(physical_gpu_ids)
         if num_gpus == 0:
-            print("No valid GPUs available for GPU Inference Performance benchmark.")
+            message = status_message or "No valid GPUs available."
+            print(f"{message} Cannot run GPU Inference Performance benchmark.")
             return None
 
         # Map physical GPU IDs to logical IDs
-        physical_to_logical = map_physical_to_logical_gpu_ids(physical_gpu_ids)
-        logical_gpu_ids = list(range(num_gpus))
+        logical_gpu_ids = [physical_to_logical[physical_id] for physical_id in physical_gpu_ids]
+
+        print(f"Using GPUs: {physical_gpu_ids} (logical IDs: {logical_gpu_ids}) for GPU Inference Performance")
 
         # Determine batch size per GPU
         batch_size_per_gpu = batch_size // num_gpus
@@ -1455,21 +1460,13 @@ def main():
     dtype = get_torch_dtype_from_precision(args.precision)
 
     # Validate and set CUDA_VISIBLE_DEVICES
-    physical_gpu_ids = set()
+    requested_gpu_ids = None
     if args.gpus is not None:
-        requested_gpu_ids = [int(id.strip()) for id in args.gpus.split(',')]
-        valid_gpu_ids = validate_gpu_ids(requested_gpu_ids)
-        if not valid_gpu_ids:
-            print("Warning: No valid GPUs specified. GPU benchmarks will be skipped.")
-        else:
-            physical_gpu_ids.update(valid_gpu_ids)
-    else:
-        detected_gpu_ids = [gpu.id for gpu in GPUtil.getGPUs()]
-        if not detected_gpu_ids:
-            print("Warning: No GPUs detected. GPU benchmarks will be skipped.")
-        physical_gpu_ids.update(detected_gpu_ids)
+        requested_gpu_ids = [int(id.strip()) for id in args.gpus.split(',') if id.strip()]
 
-    physical_gpu_id_list = sorted(physical_gpu_ids)
+    physical_gpu_ids, _, status_message = resolve_requested_gpus(requested_gpu_ids)
+
+    physical_gpu_id_list = sorted(set(physical_gpu_ids))
     if physical_gpu_id_list:
         visible_devices = ','.join(map(str, physical_gpu_id_list))
         os.environ["CUDA_VISIBLE_DEVICES"] = visible_devices
@@ -1477,17 +1474,19 @@ def main():
             print(f"Using GPUs: {visible_devices}")
         else:
             print(f"Using all available GPUs: {visible_devices}")
+        gpu_available = True
+        physical_to_logical = map_physical_to_logical_gpu_ids(physical_gpu_id_list)
+        logical_gpu_ids = [physical_to_logical[physical_id] for physical_id in physical_gpu_id_list]
     else:
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-
-    gpu_available = bool(physical_gpu_id_list)
-
-    # After setting CUDA_VISIBLE_DEVICES, logical GPU IDs start from 0
-    # Map physical GPU IDs to logical GPU IDs
-    if gpu_available:
-        physical_to_logical = map_physical_to_logical_gpu_ids(physical_gpu_id_list)
-        logical_gpu_ids = list(range(len(physical_gpu_id_list)))
-    else:
+        warning_message = status_message
+        if not warning_message:
+            if args.gpus is not None:
+                warning_message = "No valid GPUs specified."
+            else:
+                warning_message = "No GPUs detected."
+        print(f"Warning: {warning_message} GPU benchmarks will be skipped.")
+        gpu_available = False
         physical_to_logical = {}
         logical_gpu_ids = []
 
