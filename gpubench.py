@@ -31,6 +31,8 @@ import textwrap
 import threading
 import hashlib
 import gzip
+import importlib
+import shutil
 import numpy as np
 import psutil
 import GPUtil
@@ -42,6 +44,111 @@ import multiprocessing as mp
 
 
 logger = logging.getLogger(__name__)
+
+
+def configure_logging():
+    """Configure project-wide logging for consistent output."""
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(levelname)s - %(message)s",
+            datefmt="%H:%M:%S",
+        )
+    else:
+        root_logger.setLevel(logging.INFO)
+    logger.setLevel(logging.INFO)
+
+
+def is_command_available(command):
+    """Return True if the given command is available on PATH."""
+    return shutil.which(command) is not None
+
+
+def check_python_package(module_name):
+    """Return True if the given Python package can be imported."""
+    try:
+        importlib.import_module(module_name)
+        return True
+    except ImportError:
+        return False
+
+
+def check_cuda_toolkit(torch_module):
+    """Check if the CUDA toolkit or CUDA-enabled PyTorch runtime is available."""
+    if is_command_available('nvcc'):
+        return True
+
+    cuda_version = getattr(torch_module.version, 'cuda', None)
+    if cuda_version:
+        return True
+
+    return False
+
+
+def run_preflight_checks(args, run_flags, gpu_available):
+    """Run dependency checks and update execution flags as needed."""
+    logger.info("Running pre-flight dependency checks...")
+
+    updated_flags = run_flags.copy()
+    skip_reasons = {}
+
+    # Disk benchmarking requires fio.
+    if run_flags.get('disk_io'):
+        if not is_command_available('fio'):
+            logger.warning(
+                "`fio` is not installed or not on PATH. Disk I/O benchmarks will be skipped. "
+                "Install it via `sudo apt-get install -y fio` or build from https://github.com/axboe/fio."
+            )
+            updated_flags['disk_io'] = False
+            skip_reasons['disk_io'] = "Missing `fio`; install via `sudo apt-get install -y fio` or build from source."
+
+    # GPU logging and GPU introspection need nvidia-smi.
+    if run_flags.get('gpu_benchmarks') or args.log_gpu:
+        if not is_command_available('nvidia-smi'):
+            logger.warning(
+                "`nvidia-smi` was not detected. GPU monitoring and some GPU benchmarks may fail. "
+                "Install NVIDIA drivers and the CUDA toolkit from https://developer.nvidia.com/cuda-downloads."
+            )
+            if args.log_gpu:
+                logger.warning("Disabling GPU telemetry logging because `nvidia-smi` is unavailable.")
+                updated_flags['log_gpu'] = False
+                skip_reasons['log_gpu'] = "Missing `nvidia-smi`; install NVIDIA drivers and the CUDA toolkit."
+
+    # Ensure CUDA runtime/toolkit is available when GPU benchmarks are requested.
+    if run_flags.get('gpu_benchmarks') and gpu_available:
+        if not check_cuda_toolkit(torch):
+            logger.warning(
+                "A CUDA toolkit or CUDA-enabled PyTorch runtime was not detected. GPU benchmarks may not run. "
+                "Install CUDA from https://developer.nvidia.com/cuda-downloads or use a GPU-enabled PyTorch build."
+            )
+
+    # Optional model-specific dependencies for inference.
+    if run_flags.get('gpu_inference') and gpu_available:
+        model_name = getattr(args, 'gpu_inference_model', 'custom')
+        model_name_lower = model_name.lower()
+        if model_name_lower == 'resnet50':
+            if not check_python_package('torchvision'):
+                warning_message = (
+                    "`torchvision` is required for the ResNet50 inference benchmark. Install it with `pip install torchvision` "
+                    "or choose a different model via `--gpu-inference-model`. Skipping GPU inference benchmarks."
+                )
+                logger.warning(warning_message)
+                updated_flags['gpu_inference'] = False
+                skip_reasons['gpu_inference'] = warning_message
+        elif model_name_lower in {'bert', 'gpt2'}:
+            if not check_python_package('transformers'):
+                warning_message = (
+                    f"The `transformers` package is required for the {model_name.upper()} inference benchmark. Install it with "
+                    "`pip install transformers` or choose a different model via `--gpu-inference-model`. "
+                    "Skipping GPU inference benchmarks."
+                )
+                logger.warning(warning_message)
+                updated_flags['gpu_inference'] = False
+                skip_reasons['gpu_inference'] = warning_message
+
+    return updated_flags, skip_reasons
+
 
 
 def safe_get_gpus(context):
@@ -1537,6 +1644,7 @@ def benchmark_inference_performance_multi_gpu(model_name, model_size, batch_size
 
 # Main Function
 def main():
+    configure_logging()
     args = parse_arguments()
 
     # Set the default tensor type based on precision
@@ -1617,6 +1725,41 @@ def main():
         run_gpu_tensor = args.gpu_tensor
         run_gpu_memory_bandwidth = args.gpu_memory_bandwidth
         run_gpu_to_gpu_transfer = args.gpu_to_gpu_transfer
+
+    run_flags = {
+        'disk_io': run_disk_io,
+        'gpu_inference': run_gpu_inference,
+        'gpu_benchmarks': any([
+            run_gpu_inference,
+            run_gpu_data_gen,
+            run_gpu_to_cpu_transfer,
+            run_gpu_to_gpu_transfer,
+            run_gpu_memory_bandwidth,
+            run_gpu_tensor,
+            run_gpu_compute,
+        ]),
+        'log_gpu': args.log_gpu,
+    }
+
+    preflight_flags, skip_reasons = run_preflight_checks(args, run_flags, gpu_available)
+    run_disk_io = preflight_flags.get('disk_io', run_disk_io)
+    run_gpu_inference = preflight_flags.get('gpu_inference', run_gpu_inference)
+    args.log_gpu = preflight_flags.get('log_gpu', args.log_gpu)
+
+    gpu_benchmarks_requested = any([
+        run_gpu_inference,
+        run_gpu_data_gen,
+        run_gpu_to_cpu_transfer,
+        run_gpu_to_gpu_transfer,
+        run_gpu_memory_bandwidth,
+        run_gpu_tensor,
+        run_gpu_compute,
+    ])
+
+    if skip_reasons:
+        logger.info('Pre-flight skipped workloads due to missing dependencies:')
+        for workload, reason in skip_reasons.items():
+            logger.info('  %s: %s', workload, reason)
 
     # Start total execution timer
     total_start_time = time.time()
@@ -1851,7 +1994,8 @@ def main():
             'results': all_results,
             'system_info': system_info,
             'total_execution_time_seconds': total_execution_time,
-            'total_score': total_score
+            'total_score': total_score,
+            'skipped_workloads': skip_reasons
         }
         # Output results as JSON
         json_output = json.dumps(output_data, indent=4)
