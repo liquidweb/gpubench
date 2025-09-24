@@ -363,7 +363,8 @@ def benchmark_cpu_to_disk_write(file_path, data_size_gb, reference_metrics):
 
         # Cleanup
         del cpu_data
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Optionally, remove the file after benchmarking
         if os.path.exists(file_path):
