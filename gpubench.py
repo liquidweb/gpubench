@@ -1238,7 +1238,40 @@ def benchmark_gpu_computational_task(epochs, batch_size, input_size, hidden_size
         # Map physical GPU IDs to logical IDs
         logical_gpu_ids = [physical_to_logical[physical_id] for physical_id in physical_gpu_ids]
 
-        device = torch.device(f'cuda:{logical_gpu_ids[0]}')
+        def _distribute_batch_size(total_size, num_partitions):
+            base = total_size // num_partitions
+            remainder = total_size % num_partitions
+            return [base + 1 if idx < remainder else base for idx in range(num_partitions)]
+
+        per_gpu_batch_sizes = _distribute_batch_size(batch_size, num_gpus)
+        active_indices = [idx for idx, size in enumerate(per_gpu_batch_sizes) if size > 0]
+
+        if not active_indices:
+            print("Batch size results in no work for any GPU. Cannot run GPU Computational Task benchmark.")
+            return None
+
+        active_physical_ids = [physical_gpu_ids[idx] for idx in active_indices]
+        active_logical_ids = [logical_gpu_ids[idx] for idx in active_indices]
+        active_per_gpu_batch_sizes = [per_gpu_batch_sizes[idx] for idx in active_indices]
+
+        device_list = [torch.device(f'cuda:{logical_id}') for logical_id in active_logical_ids]
+        primary_device = device_list[0]
+        torch.cuda.set_device(primary_device)
+
+        num_active_gpus = len(device_list)
+
+        if num_active_gpus > 1:
+            print(f"Using GPUs: {active_physical_ids} (logical IDs: {active_logical_ids}) for GPU Computational Task")
+            per_gpu_summary = ", ".join(
+                f"GPU {phys_id} (logical {log_id}): batch {batch_sz}"
+                for phys_id, log_id, batch_sz in zip(active_physical_ids, active_logical_ids, active_per_gpu_batch_sizes)
+            )
+            print(f"Per-GPU batch sizes: {per_gpu_summary}")
+        elif num_gpus > 1:
+            print(
+                f"Batch size {batch_size} only provides work for a single GPU. "
+                f"Limiting computation to GPU {active_physical_ids[0]} (logical ID {active_logical_ids[0]})."
+            )
 
         class SimpleModel(nn.Module):
             def __init__(self, input_size, hidden_size, output_size):
@@ -1253,20 +1286,27 @@ def benchmark_gpu_computational_task(epochs, batch_size, input_size, hidden_size
                 out = self.fc2(out)
                 return out
 
-        model = SimpleModel(input_size, hidden_size, output_size).to(device, dtype=dtype)
+        base_model = SimpleModel(input_size, hidden_size, output_size).to(primary_device, dtype=dtype)
 
-        criterion = nn.MSELoss()
+        if num_active_gpus > 1:
+            model = nn.DataParallel(base_model, device_ids=active_logical_ids, output_device=active_logical_ids[0])
+        else:
+            model = base_model
+
+        criterion = nn.MSELoss().to(primary_device)
         optimizer = optim.SGD(model.parameters(), lr=0.01)
 
-        # Generate random data
-        inputs = torch.randn(batch_size, input_size, device=device, dtype=dtype)
-        targets = torch.randn(batch_size, output_size, device=device, dtype=dtype)
+        # Generate random data sized to cover the combined per-GPU workload
+        total_batch_size = sum(active_per_gpu_batch_sizes)
+        inputs = torch.randn(total_batch_size, input_size, device=primary_device, dtype=dtype)
+        targets = torch.randn(total_batch_size, output_size, device=primary_device, dtype=dtype)
 
         # Warm-up
         model(inputs)
 
         # Training loop
-        torch.cuda.synchronize()
+        for device in device_list:
+            torch.cuda.synchronize(device=device)
         start_time = time.time()
         for _ in range(epochs):
             optimizer.zero_grad()
@@ -1274,19 +1314,21 @@ def benchmark_gpu_computational_task(epochs, batch_size, input_size, hidden_size
             loss = criterion(outputs, targets)
             loss.backward()
             optimizer.step()
-        torch.cuda.synchronize()
+        for device in device_list:
+            torch.cuda.synchronize(device=device)
         end_time = time.time()
 
         total_time = end_time - start_time
 
         # Calculate GFLOPS
         flops_per_sample = 2 * (input_size * hidden_size + hidden_size * output_size)
-        total_flops = flops_per_sample * batch_size * epochs
+        per_gpu_flops = [flops_per_sample * size * epochs for size in active_per_gpu_batch_sizes]
+        total_flops = sum(per_gpu_flops)
         gflops = total_flops / total_time / 1e9
 
         input_params = (f"Epochs: {epochs}, Batch Size: {batch_size}, Input Size: {input_size}, "
                         f"Hidden Size: {hidden_size}, Output Size: {output_size}, Precision: {precision}")
-        metrics = f"GFLOPS: {gflops:.2f}"
+        metrics = f"GFLOPS: {gflops:.2f} across {num_active_gpus} GPU(s)"
 
         result = {
             'task': 'GPU Computational Task',
@@ -1295,14 +1337,21 @@ def benchmark_gpu_computational_task(epochs, batch_size, input_size, hidden_size
             'metrics': metrics,
             'performance_gflops': gflops,
             'execution_time': total_time,
-            'score': (gflops / reference_metrics['computational_task_gflops']) * 100
+            'score': (gflops / reference_metrics['computational_task_gflops']) * 100,
+            'num_gpus_used': num_active_gpus,
+            'per_gpu_batch_sizes': {
+                physical_id: batch_sz
+                for physical_id, batch_sz in zip(active_physical_ids, active_per_gpu_batch_sizes)
+            }
         }
 
         # Cleanup
         del model
         del inputs
         del targets
-        torch.cuda.empty_cache()
+        for device in device_list:
+            with torch.cuda.device(device):
+                torch.cuda.empty_cache()
 
         return result
 
