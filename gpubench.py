@@ -462,6 +462,115 @@ def _print_status(label, message, *, newline_before=False):
     print(f"{prefix} {message}")
 
 
+def _get_console_width(min_width=120):
+    """Return the current console width with a sensible minimum fallback."""
+    try:
+        width = shutil.get_terminal_size(fallback=(min_width, 24)).columns
+    except OSError:
+        width = min_width
+    return max(width, min_width)
+
+
+def _measure_table_width(table_str):
+    """Return the maximum line width of a pre-rendered table string."""
+    if not table_str:
+        return 0
+    return max(len(line) for line in table_str.splitlines())
+
+
+def _compute_column_widths(rows, headers):
+    """Compute the natural maximum content width for each column."""
+    column_count = 0
+    if headers:
+        column_count = len(headers)
+    elif rows:
+        column_count = len(rows[0])
+
+    widths = [0] * column_count
+
+    for col_idx in range(column_count):
+        cells = []
+        if headers:
+            cells.append(headers[col_idx])
+        for row in rows:
+            if col_idx < len(row):
+                cells.append(row[col_idx])
+        max_width = 0
+        for cell in cells:
+            lines = str(cell).splitlines() or [""]
+            for line in lines:
+                max_width = max(max_width, len(line))
+        widths[col_idx] = max_width
+
+    return widths
+
+
+def _render_table(rows, headers, tablefmt, colalign):
+    """Render a table while adapting to the current console width."""
+    table_kwargs = {
+        'headers': headers,
+        'tablefmt': tablefmt,
+    }
+    if colalign:
+        table_kwargs['colalign'] = colalign
+
+    table_str = tabulate(rows, **table_kwargs)
+    max_width = _get_console_width()
+
+    if _measure_table_width(table_str) <= max_width:
+        return table_str
+
+    column_count = len(headers) if headers else (len(rows[0]) if rows else 0)
+    if column_count == 0:
+        return table_str
+
+    natural_widths = _compute_column_widths(rows, headers)
+    adjustable_columns = list(range(column_count))
+    if colalign:
+        adjustable_columns = [idx for idx, align in enumerate(colalign) if align != 'right']
+        if not adjustable_columns:
+            adjustable_columns = list(range(column_count))
+
+    maxcolwidths = [None] * column_count
+    for idx in adjustable_columns:
+        maxcolwidths[idx] = natural_widths[idx]
+
+    min_column_width = 12
+
+    table_str = tabulate(rows, maxcolwidths=maxcolwidths, **table_kwargs)
+    if _measure_table_width(table_str) <= max_width:
+        return table_str
+
+    # Gradually reduce adjustable columns until the table fits or we hit the minimum width.
+    while True:
+        shrinkable = [idx for idx in adjustable_columns if maxcolwidths[idx] is None or maxcolwidths[idx] > min_column_width]
+        if not shrinkable:
+            break
+
+        widest_idx = max(
+            shrinkable,
+            key=lambda idx: maxcolwidths[idx] if maxcolwidths[idx] is not None else natural_widths[idx],
+        )
+
+        current_width = maxcolwidths[widest_idx]
+        if current_width is None:
+            maxcolwidths[widest_idx] = min_column_width
+        elif current_width > min_column_width:
+            maxcolwidths[widest_idx] = max(min_column_width, current_width - 1)
+        else:
+            adjustable_columns.remove(widest_idx)
+            continue
+
+        table_str = tabulate(rows, maxcolwidths=maxcolwidths, **table_kwargs)
+        if _measure_table_width(table_str) <= max_width:
+            return table_str
+
+        if maxcolwidths[widest_idx] == min_column_width:
+            adjustable_columns.remove(widest_idx)
+
+    return table_str
+
+
 def _print_section_table(title, rows, headers, *, tablefmt='rounded_grid', colalign=None, allow_empty=False):
     """Print a tabular section where the title is folded into the header."""
     if not rows and not allow_empty:
@@ -472,7 +581,8 @@ def _print_section_table(title, rows, headers, *, tablefmt='rounded_grid', colal
         display_headers[0] = f"{title} ▸ {display_headers[0]}"
 
     print()
-    print(tabulate(rows, headers=display_headers, tablefmt=tablefmt, colalign=colalign))
+    table_str = _render_table(rows, display_headers, tablefmt, colalign)
+    print(table_str)
 
 
 def _format_detail_value(value):
@@ -549,8 +659,9 @@ def print_results_table(results, total_score, total_execution_time):
     if not results and total_score is None and total_execution_time is None:
         return
 
-    max_width_input = 30  # Maximum width for "Input" column
-    max_width_metrics = 50  # Maximum width for "Metrics" column
+    console_width = _get_console_width()
+    max_width_input = max(18, min(30, console_width // 5))
+    max_width_metrics = max(32, min(50, int(console_width * 0.33)))
 
     sections = [
         ("GPU Benchmarks", [res for res in results if res and res.get('category') == 'GPU']),
