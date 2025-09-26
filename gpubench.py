@@ -578,7 +578,11 @@ def _print_section_table(title, rows, headers, *, tablefmt='rounded_grid', colal
 
     display_headers = list(headers) if headers else []
     if display_headers:
-        display_headers[0] = f"{title} ▸ {display_headers[0]}"
+        first_header = display_headers[0]
+        if first_header.strip().lower() == "category":
+            display_headers[0] = title
+        else:
+            display_headers[0] = f"{title} ▸ {first_header}"
 
     print()
     table_str = _render_table(rows, display_headers, tablefmt, colalign)
