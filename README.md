@@ -37,38 +37,72 @@ The following Python libraries are required:
 - `transformers`: For transformer models like BERT and GPT inference.
 - `torchvision`: For ResNet and other image-related tasks.
 
+Refer to `requirements.txt` for the complete, version-pinned dependency set.
+
 ### Installation Instructions
 
-#### Rocky/Alma Linux 9
+The project follows standard Python virtual environment practices so that the
+benchmark and its dependencies stay isolated from system packages. The steps
+below install the system prerequisites, create a virtual environment, and
+install the packages pinned in `requirements.txt`.
 
-1. Install Python and Pip:
-    ```bash
-    sudo dnf install python3 python3-pip -y
-    ```
+#### Rocky Linux 9 / AlmaLinux 9
 
-2. Install CUDA:
-   Follow the [CUDA Installation Guide for Rocky Linux](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html).
+1. Install Python tooling, Git, and `fio` (for disk benchmarks):
+   ```bash
+   sudo dnf install -y python3 python3-pip git fio
+   ```
 
-3. Install Python dependencies:
-    ```bash
-    pip3 install torch numpy psutil GPUtil tabulate transformers torchvision
-    ```
+2. Install the CUDA drivers and toolkit that match your GPUs by following the
+   official [CUDA Installation Guide for Rocky Linux](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html).
+   Confirm that `nvidia-smi` works before running GPUBench.
 
-#### Ubuntu 22.04/24.04
+3. Create and activate a virtual environment in the repository:
+   ```bash
+   cd gpubench
+   python3 -m venv .venv
+   source .venv/bin/activate
+   python -m pip install --upgrade pip
+   ```
 
-1. Install Python and Pip:
-    ```bash
-    sudo apt update
-    sudo apt install python3 python3-pip -y
-    ```
+4. Install the Python dependencies from the provided requirements file:
+   ```bash
+   python -m pip install -r requirements.txt
+   ```
 
-2. Install CUDA:
-   Follow the [CUDA Installation Guide for Ubuntu](https://developer.nvidia.com/cuda-downloads).
+#### Ubuntu 22.04 / Ubuntu 24.04
 
-3. Install the required Python packages:
-    ```bash
-    pip3 install torch numpy psutil GPUtil tabulate transformers torchvision
-    ```
+1. Install Python tooling, Git, `fio`, and the virtual environment module:
+   ```bash
+   sudo apt update
+   sudo apt install -y python3 python3-venv python3-pip git fio
+   ```
+
+2. Install the NVIDIA driver and CUDA toolkit using the
+   [CUDA Installation Guide for Ubuntu](https://developer.nvidia.com/cuda-downloads),
+   then verify `nvidia-smi` reports your GPUs.
+
+3. Create and activate a virtual environment inside the repository:
+   ```bash
+   cd gpubench
+   python3 -m venv .venv
+   source .venv/bin/activate
+   python -m pip install --upgrade pip
+   ```
+
+4. Install the Python dependencies listed in `requirements.txt`:
+   ```bash
+   python -m pip install -r requirements.txt
+   ```
+
+> **Optional packages:** GPU inference benchmarks that use ResNet, BERT, or GPT-2
+> rely on `torchvision` and `transformers`. These are included in
+> `requirements.txt` so inference workloads function out of the box. If you are
+> curating a minimal environment, remove them from the requirements file before
+> installing.
+
+After activation, the `gpubench.py` CLI can be executed with `python gpubench.py`.
+Reactivate the environment later with `source .venv/bin/activate`.
 
 ## Command-Line Options
 
@@ -99,31 +133,31 @@ The following Python libraries are required:
 - `--gpu-comp-hidden-size N`: Hidden layer size for GPU computational task (default: 4096).
 - `--gpu-comp-output-size N`: Output size for GPU computational task (default: 2000).
 
+### GPU Inference Benchmarks:
+- `--gpu-inference`: Run GPU inference throughput and latency benchmarks.
+- `--gpu-inference-model {custom,resnet50,bert,gpt2}`: Select the model to benchmark (default: `custom`).
+- `--model-size N`: Depth of the custom inference model (default: 5).
+- `--batch-size N`: Batch size for the inference benchmark (default: 256).
+- `--input-size N`: Input feature size for inference benchmark (default: 224).
+- `--output-size N`: Output dimension for inference benchmark (default: 1000).
+- `--iterations N`: Number of inference iterations to execute (default: 100).
+
 ### CPU Benchmarks:
-- `--cpu-single-thread`: Run CPU Single-threaded Performance benchmark.
-- `--cpu-multi-thread`: Run CPU Multi-threaded Performance benchmark.
-- `--cpu-to-disk-write`: Run CPU to Disk Write benchmark.
-- `--memory-bandwidth`: Run Memory Bandwidth benchmark.
-- `--cpu-num-threads N`: Number of threads to use for multi-threaded CPU benchmark (default: all logical cores).
-- `--data-size-gb-cpu N`: Data size in GB for CPU to Disk Write benchmark (default: 5.0).
-- `--memory-size-mb-cpu N`: Memory size in MB for CPU Memory Bandwidth benchmark (default: 1024).
+- `--cpu-single-thread`: Run CPU single-threaded performance benchmark.
+- `--cpu-multi-thread`: Run CPU multi-threaded performance benchmark.
+- `--cpu-to-disk-write`: Run CPU to disk write throughput benchmark.
+- `--memory-bandwidth`: Run memory bandwidth benchmark.
+- `--cpu-num-threads N`: Threads used for multi-threaded CPU benchmark (default: all logical cores).
+- `--data-size-gb-cpu N`: Data size in GB for CPU to disk write benchmark (default: 5.0).
+- `--memory-size-mb-cpu N`: Memory size in MB for CPU memory bandwidth benchmark (default: 1024).
 
 ### Disk I/O Benchmarks:
-- `--disk-io`: Run Disk I/O Performance benchmark.
+- `--disk-io`: Run disk I/O benchmark via `fio`.
 - `--disk-data-size N`: Data size in GB for disk I/O benchmark (default: 2.0).
 - `--disk-block-size N`: Block size in KB for disk I/O benchmark (default: 4).
-- `--disk-io-depth N`: IO depth for disk I/O benchmark (default: 16).
-- `--disk-num-jobs N`: Number of concurrent jobs for disk I/O benchmark (default: 8).
-- `--disk-path PATH`: Directory to use for disk benchmarks (default: current working directory).
-
-### Inference Benchmarks:
-- `--gpu-inference`: Run GPU Inference Performance benchmark.
-- `--gpu-inference-model {custom,resnet50,bert,gpt2}`: Model to use for inference benchmark (default: custom).
-- `--model-size N`: Depth of the custom inference model (default: 5).
-- `--batch-size N`: Batch size for inference benchmark (default: 256).
-- `--input-size N`: Input size for inference benchmark (default: 224).
-- `--output-size N`: Output size for inference benchmark (default: 1000).
-- `--iterations N`: Number of iterations for inference benchmark (default: 100).
+- `--disk-io-depth N`: Queue depth for disk I/O benchmark (default: 16).
+- `--disk-num-jobs N`: Number of concurrent `fio` jobs to run (default: 8).
+- `--disk-path PATH`: Target directory for the disk benchmark scratch files (default: current directory).
 
 ### Full Suite of Benchmarks:
 To run all benchmarks:
@@ -134,12 +168,17 @@ python3 gpubench.py --all
 
 #### GPU Memory Bandwidth Test:
 ```bash
-python3 gpubench.py --gpu-memory-bandwidth --memory-size-mb 1024
+python3 gpubench.py --gpu-memory-bandwidth --gpu-memory-size-gb 6
 ```
 
 #### CPU Multi-thread Performance Benchmark:
 ```bash
 python3 gpubench.py --cpu-multi-thread --cpu-num-threads 8
+```
+
+#### Run GPU Inference with ResNet50:
+```bash
+python3 gpubench.py --gpu-inference --gpu-inference-model resnet50 --batch-size 128
 ```
 #### Example Output:
 - system: 12 vCPUs, 128G RAM, 700 GB NVMe, 2x A16
