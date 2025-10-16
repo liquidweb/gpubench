@@ -181,7 +181,7 @@ python3 gpubench.py --cpu-multi-thread --cpu-num-threads 8
 python3 gpubench.py --gpu-inference --gpu-inference-model resnet50 --batch-size 128
 ```
 #### Example Output:
-- system: 12 vCPUs, 128G RAM, 700 GB NVMe, 2x A16
+- system: 2x EPYC 9254 48 Cores / 96 Threads, 256 GB RAM, 2x 3.84 TB NVMe, 1x H100 NVL 94GB
 - executed: `python3 gpubench.py` (no options)
 
 ```
