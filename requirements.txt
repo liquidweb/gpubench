@@ -1,4 +1,4 @@
-torch>=1.9.0
+torch>=2.10.0
 torchvision>=0.10.0
 numpy>=1.22.2
 psutil>=5.8.0
@@ -17,3 +17,4 @@ requests>=2.32.4 # not directly required, pinned by Snyk to avoid a vulnerabilit
 urllib3>=2.5.0 # not directly required, pinned by Snyk to avoid a vulnerability
 zipp>=3.19.1 # not directly required, pinned by Snyk to avoid a vulnerability
 fonttools>=4.61.0 # not directly required, pinned by Snyk to avoid a vulnerability
+wheel>=0.46.2 # not directly required, pinned by Snyk to avoid a vulnerability
