@@ -684,6 +684,8 @@ def print_results_table(results, total_score, total_execution_time):
         first_in_section = True
         for result in section_results:
             task = result.get('task', 'Unknown Task')
+            if 'iteration' in result:
+                task = f"{task} (iter {result['iteration']})"
             input_params = result.get('input_params', '')
             metrics = result.get('metrics', 'N/A')
             score = result.get('score', 'N/A')
@@ -1477,12 +1479,15 @@ def benchmark_memory_bandwidth(memory_size_mb, reference_metrics):
         # Warm-up
         dest_array = np.copy(src_array)
 
-        # Measure memory copy bandwidth
+        # Measure memory copy bandwidth over multiple iterations
+        num_copies = 10
         start_time = time.time()
-        dest_array = np.copy(src_array)
+        for _ in range(num_copies):
+            dest_array = np.copy(src_array)
         end_time = time.time()
 
-        copy_time = end_time - start_time
+        total_copy_time = end_time - start_time
+        copy_time = total_copy_time / num_copies
         bandwidth_gb_per_sec = (data_size / copy_time) / 1e9
 
         input_params = f"Memory Size: {memory_size_mb} MB"
@@ -1496,7 +1501,7 @@ def benchmark_memory_bandwidth(memory_size_mb, reference_metrics):
             'memory_size_mb': memory_size_mb,
             'copy_time_seconds': copy_time,
             'bandwidth_gb_per_sec': bandwidth_gb_per_sec,
-            'execution_time': copy_time,
+            'execution_time': total_copy_time,
             'score': (bandwidth_gb_per_sec / reference_metrics['memory_bandwidth_gb_per_sec']) * 100
         }
 
@@ -1540,13 +1545,15 @@ def benchmark_disk_io(file_path, data_size_gb, block_size_kb, io_depth, num_jobs
         results = {}
         total_execution_time = 0.0
 
+        ioengine = 'libaio' if sys.platform == 'linux' else 'posixaio'
+
         for test in tests:
             print(f"Running Disk {test['name'].replace('_', ' ').title()} benchmark...")
             fio_cmd = [
                 'fio',
                 f'--name={test["name"]}',
                 f'--filename={file_path}',
-                '--ioengine=libaio',
+                f'--ioengine={ioengine}',
                 f'--rw={test["rw"]}',
                 f'--size={data_size}',
                 f'--bs={block_size}',
@@ -2770,6 +2777,10 @@ def main():
                 )
                 results.append(disk_result)
 
+        if args.num_iterations > 1:
+            for result in results:
+                if result:
+                    result['iteration'] = iteration + 1
         all_results.extend(results)
 
     # Stop GPU logging if it was started
@@ -2805,7 +2816,18 @@ def main():
             'skipped_workloads': skip_reasons
         }
         # Output results as JSON
-        json_output = json.dumps(output_data, indent=4)
+        def _json_default(obj):
+            if isinstance(obj, (np.integer,)):
+                return int(obj)
+            if isinstance(obj, (np.floating,)):
+                return float(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            if isinstance(obj, torch.dtype):
+                return str(obj)
+            return str(obj)
+
+        json_output = json.dumps(output_data, indent=4, default=_json_default)
         _print_heading("JSON Output")
         print(json_output)
 
